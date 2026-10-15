@@ -1,0 +1,189 @@
+import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
+import test from 'node:test';
+
+const root = new URL('../', import.meta.url);
+const template = JSON.parse(execFileSync('az', [
+  'bicep', 'build', '--file', fileURLToPath(new URL('infra/main.bicep', root)), '--stdout',
+], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] }));
+const deployment = (name) => {
+  const result = template.resources.find((resource) =>
+    resource.type === 'Microsoft.Resources/deployments' && resource.name === name);
+  assert.ok(result, `Missing module: ${name}`);
+  return result;
+};
+const moduleTemplate = (name) => deployment(name).properties.template;
+const resources = (name, type) => moduleTemplate(name).resources.filter((resource) => resource.type === type);
+const single = (name, type) => {
+  const found = resources(name, type);
+  assert.equal(found.length, 1, `${name}: expected one ${type}`);
+  return found[0];
+};
+const app = single('gateway-container-apps', 'Microsoft.App/containerApps');
+const gateway = app.properties.template.containers.find((container) => container.name === 'agentgateway');
+const collector = app.properties.template.containers.find((container) => container.name === 'otel-collector');
+
+test('deployment keeps gateway credentials secure through every module boundary', () => {
+  assert.equal(template.parameters.gatewayApiKey.type.toLowerCase(), 'securestring');
+  assert.equal(template.parameters.gatewayApiKey.minLength, 32);
+  assert.ok(!Object.hasOwn(template.parameters.gatewayApiKey, 'defaultValue'));
+  for (const name of ['gateway-key-vault', 'consumer-model-connection']) {
+    assert.equal(moduleTemplate(name).parameters.gatewayApiKey.type.toLowerCase(), 'securestring');
+    assert.equal(deployment(name).properties.parameters.gatewayApiKey.value, "[parameters('gatewayApiKey')]");
+  }
+  assert.ok(!JSON.stringify(template.outputs).includes("parameters('gatewayApiKey')"));
+  assert.ok(!JSON.stringify(app).includes("parameters('gatewayApiKey')"));
+});
+
+test('only the source account receives the pinned model deployment', () => {
+  const model = single('source-foundry', 'Microsoft.CognitiveServices/accounts/deployments');
+  assert.deepEqual(model.properties.model, { format: 'OpenAI', name: '[variables(\'modelName\')]', version: '2026-03-17' });
+  assert.equal(moduleTemplate('source-foundry').variables.modelName, 'gpt-5.4-nano');
+  assert.equal(model.sku.name, 'GlobalStandard');
+  assert.equal(model.sku.capacity, "[parameters('modelCapacity')]");
+  assert.equal(model.properties.versionUpgradeOption, 'NoAutoUpgrade');
+  assert.equal(template.parameters.modelCapacity.defaultValue, 10);
+  assert.equal(template.parameters.modelCapacity.minValue, 1);
+  assert.equal(resources('consumer-foundry', 'Microsoft.CognitiveServices/accounts/deployments').length, 0);
+  for (const name of ['source-foundry', 'consumer-foundry']) {
+    const account = single(name, 'Microsoft.CognitiveServices/accounts');
+    const project = single(name, 'Microsoft.CognitiveServices/accounts/projects');
+    assert.equal(account.kind, 'AIServices');
+    assert.equal(account.properties.disableLocalAuth, true);
+    assert.equal(account.properties.allowProjectManagement, true);
+    assert.equal(project.identity.type, 'SystemAssigned');
+  }
+});
+
+test('gateway identity can infer only against the source account', () => {
+  const role = resources('source-foundry', 'Microsoft.Authorization/roleAssignments')
+    .find((resource) => resource.properties.principalId === "[parameters('gatewayPrincipalId')]");
+  assert.ok(role);
+  assert.match(role.properties.roleDefinitionId, /5e0bd9bd-7b93-4f28-af87-19fc36ad61bd/);
+  assert.equal(role.properties.principalType, 'ServicePrincipal');
+  assert.match(role.scope, /Microsoft.CognitiveServices\/accounts/);
+  assert.equal(resources('consumer-foundry', 'Microsoft.Authorization/roleAssignments')
+    .filter((resource) => resource.properties.principalId === "[parameters('gatewayPrincipalId')]").length, 0);
+});
+
+test('gateway secret is purge-protected, versionless and readable only at secret scope', () => {
+  const vault = single('gateway-key-vault', 'Microsoft.KeyVault/vaults');
+  assert.equal(vault.properties.enableRbacAuthorization, true);
+  assert.equal(vault.properties.enablePurgeProtection, true);
+  assert.equal(vault.properties.enableSoftDelete, true);
+  const secret = single('gateway-key-vault', 'Microsoft.KeyVault/vaults/secrets');
+  assert.match(secret.name, /agentgateway-api-key/);
+  assert.equal(secret.properties.value, "[parameters('gatewayApiKey')]");
+  const access = resources('gateway-key-vault', 'Microsoft.Authorization/roleAssignments')
+    .find((resource) => resource.properties.principalId === "[parameters('gatewayPrincipalId')]");
+  assert.match(access.scope, /Microsoft.KeyVault\/vaults\/secrets/);
+  assert.match(access.properties.roleDefinitionId, /4633458b-17de-408a-b874-0445c86b69e6/);
+  const reference = app.properties.configuration.secrets.find((value) => value.name === 'agentgateway-api-key');
+  assert.equal(reference.keyVaultUrl, "[parameters('apiKeySecretUri')]");
+  assert.equal(reference.identity, "[parameters('gatewayIdentityId')]");
+  assert.ok(!Object.hasOwn(reference, 'value'));
+  const secretUri = moduleTemplate('gateway-key-vault').outputs.apiKeySecretUri.value;
+  assert.match(secretUri, /format\('\{0\}secrets\/\{1\}'/);
+  assert.ok(secretUri.includes("'agentgateway-api-key'"));
+});
+
+test('inference is the sole external ingress and uses the tested pinned image', async () => {
+  assert.deepEqual(app.properties.configuration.ingress, {
+    external: true, allowInsecure: false, targetPort: 4000, transport: 'http',
+  });
+  assert.equal(app.identity.type, 'UserAssigned');
+  assert.equal(gateway.image, "[parameters('gatewayImage')]");
+  const gatewayTest = await readFile(new URL('tests/gateway.test.mjs', root), 'utf8');
+  assert.ok(gatewayTest.includes(template.parameters.gatewayImage.defaultValue));
+  assert.deepEqual(gateway.args, ['-f', '/etc/agentgateway/config.yaml']);
+  assert.deepEqual(gateway.env.find((entry) => entry.name === 'AGENTGATEWAY_API_KEY'), {
+    name: 'AGENTGATEWAY_API_KEY', secretRef: 'agentgateway-api-key',
+  });
+  assert.equal(gateway.env.find((entry) => entry.name === 'SOURCE_AZURE_OPENAI_RESOURCE_NAME').value, "[parameters('sourceAccountName')]");
+  assert.deepEqual(app.properties.template.scale, { minReplicas: 1, maxReplicas: 1 });
+});
+
+test('health probes do not invoke a model or expose the admin listener', () => {
+  for (const type of ['Startup', 'Readiness']) {
+    const probe = gateway.probes.find((entry) => entry.type === type);
+    assert.equal(probe.httpGet.path, '/healthz/ready');
+    assert.equal(probe.httpGet.port, 15021);
+  }
+  const live = gateway.probes.find((entry) => entry.type === 'Liveness');
+  assert.deepEqual(live.tcpSocket, { port: 4000 });
+  assert.ok(!Object.hasOwn(live, 'httpGet'));
+  assert.ok(!gateway.probes.some((probe) => probe.httpGet?.port === 15000));
+});
+
+test('both containers mount the exact checked-in configuration', async () => {
+  for (const [secretName, file, container] of [
+    ['gateway-config', 'agentgateway/config.yaml', gateway],
+    ['otel-config', 'monitoring/otel-collector.yaml', collector],
+  ]) {
+    const secret = app.properties.configuration.secrets.find((entry) => entry.name === secretName);
+    const variable = /^\[variables\('([^']+)'\)\]$/.exec(secret.value);
+    const content = variable ? moduleTemplate('gateway-container-apps').variables[variable[1]] : secret.value;
+    assert.equal(content, await readFile(new URL(file, root), 'utf8'));
+    const mount = container.volumeMounts.find((entry) => entry.volumeName === secretName);
+    assert.ok(mount);
+    const volume = app.properties.template.volumes.find((entry) => entry.name === mount.volumeName);
+    assert.equal(volume.storageType, 'Secret');
+    assert.deepEqual(volume.secrets, [{ secretRef: secretName, path: 'config.yaml' }]);
+  }
+});
+
+test('model connection uses the /v1 base URL, bearer formatting and the public alias', () => {
+  const connection = single('consumer-model-connection', 'Microsoft.CognitiveServices/accounts/projects/connections');
+  assert.match(connection.name, /agentgateway-gateway/);
+  assert.equal(connection.properties.category, 'ModelGateway');
+  assert.equal(connection.properties.authType, 'ApiKey');
+  assert.match(connection.properties.target, /\/v1/);
+  assert.equal(connection.properties.credentials.key, "[parameters('gatewayApiKey')]");
+  assert.equal(connection.properties.metadata.deploymentInPath, 'false');
+  assert.match(connection.properties.metadata.authConfig, /Authorization/);
+  assert.match(connection.properties.metadata.authConfig, /Bearer \{api_key\}/);
+  assert.match(connection.properties.metadata.models, /gpt-5.4-nano/);
+});
+
+test('monitoring requires Entra ingestion and sends diagnostics to the shared workspace', () => {
+  const insights = single('shared-monitoring', 'Microsoft.Insights/components');
+  const workspace = single('shared-monitoring', 'Microsoft.OperationalInsights/workspaces');
+  assert.equal(insights.properties.DisableLocalAuth, true);
+  assert.equal(workspace.properties.retentionInDays, 30);
+  assert.match(insights.properties.WorkspaceResourceId, /Microsoft.OperationalInsights\/workspaces/);
+  const role = resources('shared-monitoring', 'Microsoft.Authorization/roleAssignments')
+    .find((resource) => resource.properties.principalId === "[parameters('gatewayPrincipalId')]");
+  assert.match(role.properties.roleDefinitionId, /3913510d-42f4-4e42-8a64-420c390055eb/);
+  for (const name of ['source-foundry', 'consumer-foundry', 'gateway-key-vault', 'gateway-container-apps']) {
+    const diagnostics = resources(name, 'Microsoft.Insights/diagnosticSettings');
+    assert.ok(diagnostics.length > 0);
+    for (const resource of diagnostics) assert.equal(resource.properties.workspaceId, "[parameters('workspaceId')]");
+  }
+  const environment = single('gateway-container-apps', 'Microsoft.App/managedEnvironments');
+  assert.equal(environment.properties.appLogsConfiguration.destination, 'azure-monitor');
+  assert.equal(collector.env.find((entry) => entry.name === 'AZURE_CLIENT_ID').value, "[parameters('gatewayClientId')]");
+});
+
+test('deployment ordering waits for identity, secret access and source model resources', () => {
+  const dependencies = deployment('gateway-container-apps').dependsOn.join('\n');
+  for (const name of ['gateway-identity', 'gateway-key-vault', 'shared-monitoring', 'source-foundry']) {
+    assert.ok(dependencies.includes(`'${name}'`));
+  }
+  const connectionDependencies = deployment('consumer-model-connection').dependsOn.join('\n');
+  for (const name of ['consumer-foundry', 'gateway-container-apps', 'source-foundry']) {
+    assert.ok(connectionDependencies.includes(`'${name}'`));
+  }
+});
+
+test('azd parameters use process-supplied secrets and do not bypass governance', async () => {
+  const parameters = JSON.parse(await readFile(new URL('infra/main.parameters.json', root), 'utf8')).parameters;
+  assert.equal(parameters.gatewayApiKey.value, '${AGENTGATEWAY_API_KEY}');
+  assert.equal(parameters.principalId.value, '${AZURE_PRINCIPAL_ID}');
+  assert.deepEqual(parameters.tags.value, {});
+  assert.deepEqual(template.parameters.location.allowedValues, ['eastus', 'uksouth', 'swedencentral']);
+  for (const name of ['AGENTGATEWAY_ENDPOINT', 'AZURE_KEY_VAULT_NAME', 'CONSUMER_MODEL_REFERENCE', 'APPLICATIONINSIGHTS_CONNECTION_STRING']) {
+    assert.ok(template.outputs[name], `Missing output ${name}`);
+  }
+});

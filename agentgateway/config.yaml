@@ -1,0 +1,34 @@
+# yaml-language-server: $schema=https://agentgateway.dev/schema/config
+config:
+  adminAddr: 127.0.0.1:15000
+  statsAddr: 127.0.0.1:15020
+  readinessAddr: 0.0.0.0:15021
+  tracing:
+    otlpEndpoint: http://127.0.0.1:4318
+    otlpProtocol: http
+    path: /v1/traces
+    randomSampling: 1
+gateways:
+  default:
+    port: 4000
+    bindAddress: 0.0.0.0
+llm:
+  policies:
+    apiKey:
+      mode: strict
+      keys:
+        - key: "$AGENTGATEWAY_API_KEY"
+  models:
+    - name: gpt-5.4-nano
+      provider: azure
+      auth:
+        azure:
+          explicitConfig:
+            managedIdentity:
+              userAssignedIdentity:
+                clientId: "$AZURE_CLIENT_ID"
+      params:
+        azureResourceName: "$SOURCE_AZURE_OPENAI_RESOURCE_NAME"
+        azureResourceType: openAI
+        azureApiVersion: v1
+        model: gpt-5.4-nano
