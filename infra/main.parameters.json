@@ -18,7 +18,10 @@
       "value": "${MODEL_CAPACITY=10}"
     },
     "tags": {
-      "value": {}
+      "value": {
+        "CostControl": "Ignore",
+        "SecurityControl": "Ignore"
+      }
     }
   }
 }

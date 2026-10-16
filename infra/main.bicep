@@ -82,6 +82,7 @@ module sourceFoundry './modules/source-foundry.bicep' = {
     gatewayPrincipalId: identity.outputs.principalId
     modelCapacity: modelCapacity
     workspaceId: monitoring.outputs.workspaceId
+    appInsightsName: monitoring.outputs.appInsightsName
   }
 }
 
@@ -94,6 +95,7 @@ module consumerFoundry './modules/consumer-foundry.bicep' = {
     suffix: suffix
     principalId: principalId
     workspaceId: monitoring.outputs.workspaceId
+    appInsightsName: monitoring.outputs.appInsightsName
   }
 }
 
@@ -153,6 +155,7 @@ output CONSUMER_FOUNDRY_NAME string = consumerFoundry.outputs.name
 output CONSUMER_FOUNDRY_PROJECT_ENDPOINT string = consumerFoundry.outputs.projectEndpoint
 output AZURE_AI_PROJECT_ID string = consumerFoundry.outputs.projectId
 output AZURE_AI_PROJECT_ENDPOINT string = consumerFoundry.outputs.projectEndpoint
+output FOUNDRY_PROJECT_ENDPOINT string = consumerFoundry.outputs.projectEndpoint
 output AZURE_KEY_VAULT_NAME string = keyVault.outputs.name
 output CONSUMER_MODEL_CONNECTION_NAME string = modelConnection.outputs.name
 output CONSUMER_MODEL_REFERENCE string = modelConnection.outputs.modelReference

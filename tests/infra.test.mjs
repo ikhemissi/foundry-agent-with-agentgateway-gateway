@@ -166,6 +166,43 @@ test('monitoring requires Entra ingestion and sends diagnostics to the shared wo
   assert.equal(collector.env.find((entry) => entry.name === 'AZURE_CLIENT_ID').value, "[parameters('gatewayClientId')]");
 });
 
+test('both projects use their own identity to publish traces to shared Application Insights', () => {
+  for (const name of ['source-foundry', 'consumer-foundry']) {
+    const project = single(name, 'Microsoft.CognitiveServices/accounts/projects');
+    const connection = single(name, 'Microsoft.CognitiveServices/accounts/projects/connections');
+    const projectId = name === 'source-foundry' ? 'source-project' : 'consumer-project';
+    assert.ok(project.name.includes(`'${projectId}'`));
+    assert.match(deployment(name).properties.parameters.appInsightsName.value,
+      /^\[reference\(extensionResourceId\(.+'Microsoft.Resources\/deployments', 'shared-monitoring'\), '[^']+'\)\.outputs\.appInsightsName\.value\]$/);
+    assert.equal(connection.apiVersion, '2026-09-01');
+    assert.ok(connection.name.includes(`'${projectId}'`));
+    assert.ok(connection.name.includes("parameters('appInsightsName')"));
+    assert.equal(connection.properties.category, 'AppInsights');
+    assert.equal(connection.properties.authType, 'ProjectManagedIdentity');
+    assert.equal(connection.properties.isSharedToAll, false);
+    assert.equal(connection.properties.target,
+      "[resourceId('Microsoft.Insights/components', parameters('appInsightsName'))]");
+    assert.deepEqual(connection.properties.metadata, {
+      ApiType: 'Azure',
+      ResourceId: connection.properties.target,
+      ApplicationInsightsConnectionString:
+        "[reference(resourceId('Microsoft.Insights/components', parameters('appInsightsName')), '2020-02-02').ConnectionString]",
+    });
+    assert.ok(!Object.hasOwn(connection.properties, 'credentials'));
+    const publishers = resources(name, 'Microsoft.Authorization/roleAssignments')
+      .filter((role) => role.properties.roleDefinitionId.includes('3913510d-42f4-4e42-8a64-420c390055eb'));
+    assert.equal(publishers.length, 1);
+    const publisher = publishers[0];
+    assert.equal(publisher.scope, connection.properties.target);
+    assert.equal(publisher.properties.principalType, 'ServicePrincipal');
+    assert.equal(publisher.properties.principalId,
+      `[reference(resourceId('Microsoft.CognitiveServices/accounts/projects', format('foundry-${name === 'source-foundry' ? 'source' : 'consumer'}-{0}', parameters('suffix')), '${projectId}'), '2025-06-01', 'full').identity.principalId]`);
+    assert.ok(connection.dependsOn.some((dependency) =>
+      dependency.includes('Microsoft.Authorization/roleAssignments') && dependency.includes('Monitoring Metrics Publisher')));
+    assert.ok(deployment(name).dependsOn.some((dependency) => dependency.includes("'shared-monitoring'")));
+  }
+});
+
 test('deployment ordering waits for identity, secret access and source model resources', () => {
   const dependencies = deployment('gateway-container-apps').dependsOn.join('\n');
   for (const name of ['gateway-identity', 'gateway-key-vault', 'shared-monitoring', 'source-foundry']) {
@@ -177,13 +214,14 @@ test('deployment ordering waits for identity, secret access and source model res
   }
 });
 
-test('azd parameters use process-supplied secrets and do not bypass governance', async () => {
+test('azd parameters use process-supplied secrets and explicit demo tags', async () => {
   const parameters = JSON.parse(await readFile(new URL('infra/main.parameters.json', root), 'utf8')).parameters;
   assert.equal(parameters.gatewayApiKey.value, '${AGENTGATEWAY_API_KEY}');
   assert.equal(parameters.principalId.value, '${AZURE_PRINCIPAL_ID}');
-  assert.deepEqual(parameters.tags.value, {});
+  assert.deepEqual(parameters.tags.value, { CostControl: 'Ignore', SecurityControl: 'Ignore' });
   assert.deepEqual(template.parameters.location.allowedValues, ['eastus', 'uksouth', 'swedencentral']);
   for (const name of ['AGENTGATEWAY_ENDPOINT', 'AZURE_KEY_VAULT_NAME', 'CONSUMER_MODEL_REFERENCE', 'APPLICATIONINSIGHTS_CONNECTION_STRING']) {
     assert.ok(template.outputs[name], `Missing output ${name}`);
   }
+  assert.deepEqual(template.outputs.FOUNDRY_PROJECT_ENDPOINT, template.outputs.AZURE_AI_PROJECT_ENDPOINT);
 });

@@ -15,8 +15,9 @@ Both target `gpt-5.4-nano` in a separate **source Foundry account**. The
 **consumer Foundry account** hosts the tutors without local model capacity.
 Neither tutor invokes the other or bypasses the gateway.
 
-> **Status:** local tests pass; Azure deployment and end-to-end inference remain
-> unverified. Foundry project tracing connections are not yet configured.
+> **Status:** deployed and smoke-tested in UK South with both independent tutors.
+> Trace ingestion/correlation, credential rotation, and identity refresh still
+> require end-to-end validation.
 
 ## Architecture
 
@@ -68,8 +69,8 @@ flowchart LR
 ```
 
 Both paths use the same gateway deployment, whose identity also resolves its
-inference key from Key Vault. Gateway and hosted-tutor traces target shared
-Application Insights; resource diagnostics target its Log Analytics workspace.
+inference key from Key Vault. Both Foundry projects, the gateway, and hosted
+tutor target shared Application Insights; resource diagnostics target its Log Analytics workspace.
 See [Shared monitoring](#shared-monitoring) for current coverage.
 
 ## Prerequisites
@@ -91,8 +92,8 @@ See [Shared monitoring](#shared-monitoring) for current coverage.
 | UK South | `uksouth` |
 | Sweden Central | `swedencentral` |
 
-The commands below describe the intended cloud workflow, which has not yet been
-validated against Azure.
+The deployment and both inference paths have been validated in UK South.
+Check regional availability and quota before deploying elsewhere.
 
 ```bash
 az login
@@ -110,9 +111,10 @@ local Docker nor a project-owned container registry.
 
 Configuration:
 
-- [main.parameters.json](infra/main.parameters.json) accepts custom `tags`,
-  defaulting to `{}`. Taggable resources receive these plus `azd-env-name`;
-  there are no default governance-exemption tags.
+- [main.parameters.json](infra/main.parameters.json) supplies `CostControl=Ignore`
+  and `SecurityControl=Ignore` demo tags. Taggable resources receive these plus
+  `azd-env-name`. Use these values only where authorized; tags alone do not
+  guarantee a governance-policy exemption.
 - [main.bicep](infra/main.bicep) coordinates resource-group-scoped
   [modules](infra/modules/). The allowed regions are listed above; use a new
   environment when changing regions after provisioning.
@@ -179,6 +181,8 @@ azd deploy ai-tutor-hosted-agent
 The alias is `gpt-5.4-nano`, without a connection prefix. The runtime uses
 `AGENTGATEWAY_BASE_URL=${AGENTGATEWAY_ENDPOINT}/v1`; direct gateway calls do not
 use Foundry's connection-qualified model syntax.
+Provisioning exports `FOUNDRY_PROJECT_ENDPOINT` for native azd deployment,
+alongside the `AZURE_AI_PROJECT_ENDPOINT` alias.
 
 The hosted identity becomes available after deployment. A service-level
 `postdeploy` hook retrieves it and applies
@@ -248,6 +252,13 @@ readiness, and collector endpoints are not public.
 workspace-backed Application Insights component and Log Analytics workspace.
 Local-auth ingestion is disabled.
 
+Both Foundry projects connect with **Project Managed Identity**; each project's
+system-assigned identity receives **Monitoring Metrics Publisher** on that
+component only. The connections are created after their role assignments.
+Project-managed trace ingestion is a Foundry preview. The connection uses API
+`2026-09-01`; its `ProjectManagedIdentity` authentication is ahead of the published
+Bicep types, so the modules narrowly suppress the missing-schema warning.
+
 agentgateway sends OpenTelemetry spans to a loopback-only collector sidecar.
 The collector authenticates with the gateway identity and **Monitoring Metrics
 Publisher**, allowing Entra-only ingestion. The Application Insights connection
@@ -256,8 +267,7 @@ Gateway traces omit prompt/response content in the tested configuration.
 
 The hosted tutor exports Agent Framework/OpenTelemetry traces to the same
 component using its own identity, with message-content capture disabled.
-**Foundry project tracing connections and their publisher roles are still
-pending**, so prompt-tutor project traces are not yet wired.
+The prompt tutor uses the consumer project's managed tracing connection.
 
 Supported diagnostics from Foundry accounts/projects, Key Vault, Container Apps,
 and its environment target the shared workspace. Resource diagnostics are
@@ -267,7 +277,8 @@ The deployer's monitoring roles can expose sensitive GenAI data.
 azd outputs include `APPLICATIONINSIGHTS_NAME`,
 `APPLICATIONINSIGHTS_RESOURCE_ID`, `APPLICATIONINSIGHTS_CONNECTION_STRING`, and
 `AZURE_LOG_ANALYTICS_WORKSPACE_ID`. Inspect **Application Insights > Logs** for
-traces and the shared workspace for resource logs. Azure ingestion and
+traces, **Foundry > Agents > Traces** for agent traces, and the shared workspace
+for resource logs. Azure ingestion and
 cross-component correlation remain unverified; ingestion can incur charges.
 
 ## Validate and operate

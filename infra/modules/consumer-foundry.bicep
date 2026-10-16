@@ -5,6 +5,11 @@ param tags object
 param suffix string
 param principalId string
 param workspaceId string
+param appInsightsName string
+
+resource appInsights 'Microsoft.Insights/components@2020-02-02' existing = {
+  name: appInsightsName
+}
 
 resource account 'Microsoft.CognitiveServices/accounts@2025-06-01' = {
   name: 'foundry-consumer-${suffix}'
@@ -47,6 +52,37 @@ resource deployerAccess 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
     principalId: principalId
     principalType: 'User'
   }
+}
+
+resource projectTelemetryPublisher 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(appInsights.id, project.id, 'Monitoring Metrics Publisher')
+  scope: appInsights
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '3913510d-42f4-4e42-8a64-420c390055eb')
+    principalId: project.identity.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// Published Bicep types lag the service's ProjectManagedIdentity connection support.
+#disable-next-line BCP081
+resource projectAppInsights 'Microsoft.CognitiveServices/accounts/projects/connections@2026-09-01' = {
+  parent: project
+  name: appInsightsName
+  properties: {
+    category: 'AppInsights'
+    target: appInsights.id
+    authType: 'ProjectManagedIdentity'
+    isSharedToAll: false
+    metadata: {
+      ApiType: 'Azure'
+      ResourceId: appInsights.id
+      ApplicationInsightsConnectionString: appInsights.properties.ConnectionString
+    }
+  }
+  dependsOn: [
+    projectTelemetryPublisher
+  ]
 }
 
 resource accountDiagnostics 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {
