@@ -1,0 +1,69 @@
+routes:
+  - name: delegated-inference
+    matches:
+      - path:
+          exact: /delegated/v1/chat/completions
+    policies:
+      ai:
+        routes:
+          /delegated/v1/chat/completions: completions
+      jwtAuth:
+        mode: strict
+        issuer: "https://login.microsoftonline.com/$AZURE_TENANT_ID/v2.0"
+        audiences: ["$AGENTGATEWAY_ENTRA_CLIENT_ID"]
+        jwks:
+          url: "https://login.microsoftonline.com/$AZURE_TENANT_ID/discovery/v2.0/keys"
+      authorization:
+        rules:
+          - allow: 'jwt.tid == "$AZURE_TENANT_ID" && jwt.oid in $AGENTGATEWAY_ALLOWED_PRINCIPAL_IDS && has(jwt.azp) && jwt.azp == "$AGENTGATEWAY_DELEGATED_AGENT_CLIENT_ID" && has(jwt.scp) && "gateway.invoke" in jwt.scp.split(" ")'
+    backends:
+      - ai:
+          name: delegated-source-model
+          pathOverride: /openai/v1/chat/completions
+          provider:
+            azure:
+              resourceName: "$SOURCE_AZURE_OPENAI_RESOURCE_NAME"
+              resourceType: openAI
+              apiVersion: v1
+              model: gpt-5.4-nano
+        policies:
+          backendAuth:
+            azure:
+              explicitConfig:
+                managedIdentity:
+                  userAssignedIdentity:
+                    clientId: "$AZURE_CLIENT_ID"
+  - name: entra-inference
+    matches:
+      - path:
+          exact: /entra/v1/chat/completions
+    policies:
+      ai:
+        routes:
+          /entra/v1/chat/completions: completions
+      jwtAuth:
+        mode: strict
+        issuer: "https://login.microsoftonline.com/$AZURE_TENANT_ID/v2.0"
+        audiences: ["$AGENTGATEWAY_ENTRA_CLIENT_ID"]
+        jwks:
+          url: "https://login.microsoftonline.com/$AZURE_TENANT_ID/discovery/v2.0/keys"
+      authorization:
+        rules:
+          - allow: 'jwt.tid == "$AZURE_TENANT_ID" && jwt.oid in $AGENTGATEWAY_ALLOWED_PRINCIPAL_IDS && ((has(jwt.idtyp) && jwt.idtyp == "app") || (has(jwt.scp) && "gateway.invoke" in jwt.scp.split(" ")))'
+    backends:
+      - ai:
+          name: entra-source-model
+          pathOverride: /openai/v1/chat/completions
+          provider:
+            azure:
+              resourceName: "$SOURCE_AZURE_OPENAI_RESOURCE_NAME"
+              resourceType: openAI
+              apiVersion: v1
+              model: gpt-5.4-nano
+        policies:
+          backendAuth:
+            azure:
+              explicitConfig:
+                managedIdentity:
+                  userAssignedIdentity:
+                    clientId: "$AZURE_CLIENT_ID"

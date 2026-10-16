@@ -22,7 +22,9 @@ services:
       - protocol: responses
         version: 2.0.0
     env:
-      AGENTGATEWAY_BASE_URL: ${AGENTGATEWAY_ENDPOINT}/v1
+      AGENTGATEWAY_BASE_URL: ${AGENTGATEWAY_HOSTED_BASE_URL}
+      AGENTGATEWAY_AUTH_MODE: ${AGENTGATEWAY_AUTH_MODE}
+      AGENTGATEWAY_TOKEN_SCOPE: ${AGENTGATEWAY_TOKEN_SCOPE}
       AZURE_KEY_VAULT_NAME: ${AZURE_KEY_VAULT_NAME}
       APPLICATIONINSIGHTS_CONNECTION_STRING: ${APPLICATIONINSIGHTS_CONNECTION_STRING}
       OTEL_SERVICE_NAME: ai-tutor-hosted-agent
@@ -37,9 +39,22 @@ services:
         dir: ../..
         run: node scripts/grant-hosted-agent-access.mjs
 hooks:
+  preprovision:
+    shell: sh
+    run: |
+      set -eu
+      if [ -n "${PROMPT_GATEWAY_CLIENT_ID:-}" ]; then
+        test -n "${AGENTGATEWAY_ENTRA_CLIENT_ID:-}" || { echo "AGENTGATEWAY_ENTRA_CLIENT_ID is required for prompt OAuth authentication." >&2; exit 1; }
+        test -n "${PROMPT_GATEWAY_PRINCIPAL_ID:-}" || { echo "PROMPT_GATEWAY_PRINCIPAL_ID is required for prompt OAuth authentication." >&2; exit 1; }
+        test -n "${PROMPT_GATEWAY_CLIENT_SECRET:-}" || { echo "Supply PROMPT_GATEWAY_CLIENT_SECRET from Key Vault through the process environment." >&2; exit 1; }
+      fi
   postprovision:
     shell: sh
-    run: node scripts/deploy-prompt-agent.mjs
+    run: |
+      set -eu
+      revision="$(az containerapp show --name "$AGENTGATEWAY_CONTAINER_APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --query properties.latestRevisionName -o tsv)"
+      az containerapp revision restart --name "$AGENTGATEWAY_CONTAINER_APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --revision "$revision" --output none
+      node scripts/deploy-prompt-agent.mjs
   postdeploy:
     shell: sh
     run: node scripts/deploy-prompt-agent.mjs

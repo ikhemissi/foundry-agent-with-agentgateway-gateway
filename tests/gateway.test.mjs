@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
+import { generateKeyPairSync, sign } from 'node:crypto';
 import { once } from 'node:events';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
@@ -14,6 +15,9 @@ const apiKey = 'local-compatibility-key-not-a-real-credential';
 const identityHeader = 'local-identity-header-not-a-real-credential';
 const token = 'local-managed-identity-token';
 const sensitiveMessage = 'PRIVATE-COMPATIBILITY-MESSAGE-DO-NOT-CAPTURE';
+const tenantId = '22222222-2222-2222-2222-222222222222';
+const audience = '33333333-3333-3333-3333-333333333333';
+const allowedPrincipal = '44444444-4444-4444-4444-444444444444';
 
 async function listen(server) {
   server.listen(0, '127.0.0.1');
@@ -32,11 +36,30 @@ test('pinned gateway: Azure identity, authentication, inference, streaming and t
   const upstreamRequests = [];
   const identityRequests = [];
   const traces = [];
+  const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const jwk = { ...publicKey.export({ format: 'jwk' }), kid: 'test-key', use: 'sig', alg: 'RS256' };
+  const jwt = (overrides = {}, signingKey = privateKey) => {
+    const now = Math.floor(Date.now() / 1000);
+    const header = Buffer.from(JSON.stringify({ alg: 'RS256', kid: 'test-key', typ: 'JWT' })).toString('base64url');
+    const payload = Buffer.from(JSON.stringify({
+      iss: `https://login.microsoftonline.com/${tenantId}/v2.0`,
+      aud: audience, tid: tenantId, oid: allowedPrincipal, azp: 'test-agent',
+      iat: now, nbf: now - 10, exp: now + 3600, idtyp: 'user', scp: 'gateway.invoke',
+      ...overrides,
+    })).toString('base64url');
+    const input = `${header}.${payload}`;
+    return `${input}.${sign('RSA-SHA256', Buffer.from(input), signingKey).toString('base64url')}`;
+  };
   let releaseStream;
   const streamMayFinish = new Promise((resolve) => { releaseStream = resolve; });
   t.after(() => releaseStream());
   const mock = createServer(async (request, response) => {
     const url = new URL(request.url, 'http://localhost');
+    if (url.pathname === '/jwks') {
+      response.setHeader('content-type', 'application/json');
+      response.end(JSON.stringify({ keys: [jwk] }));
+      return;
+    }
     if (url.pathname === '/identity') {
       identityRequests.push({ url, headers: request.headers });
       response.setHeader('content-type', 'application/json');
@@ -96,6 +119,11 @@ test('pinned gateway: Azure identity, authentication, inference, streaming and t
   const directory = await mkdtemp(join(tmpdir(), 'agentgateway-compatibility-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   let config = await readFile(new URL('../agentgateway/config.yaml', import.meta.url), 'utf8');
+  const entra = (await readFile(new URL('../agentgateway/entra.yaml', import.meta.url), 'utf8'))
+    .replaceAll('https://login.microsoftonline.com/$AZURE_TENANT_ID/discovery/v2.0/keys', `http://127.0.0.1:${mockPort}/jwks`)
+    .replace('name: entra-source-model', `name: entra-source-model\n          hostOverride: 127.0.0.1:${mockPort}`)
+    .replace('name: delegated-source-model', `name: delegated-source-model\n          hostOverride: 127.0.0.1:${mockPort}`);
+  config += `\n${entra}`;
   for (const [original, replacement] of [
     ['127.0.0.1:15000', `127.0.0.1:${ports.admin}`],
     ['127.0.0.1:15020', `127.0.0.1:${ports.stats}`],
@@ -114,6 +142,10 @@ test('pinned gateway: Azure identity, authentication, inference, streaming and t
     'run', '--rm', '--network', 'host', '--name', name,
     '-v', `${directory}/config.yaml:/config.yaml:ro`,
     '-e', `AGENTGATEWAY_API_KEY=${apiKey}`,
+    '-e', `AZURE_TENANT_ID=${tenantId}`,
+    '-e', `AGENTGATEWAY_ENTRA_CLIENT_ID=${audience}`,
+    '-e', `AGENTGATEWAY_ALLOWED_PRINCIPAL_IDS=${JSON.stringify([allowedPrincipal])}`,
+    '-e', 'AGENTGATEWAY_DELEGATED_AGENT_CLIENT_ID=test-agent',
     '-e', 'SOURCE_AZURE_OPENAI_RESOURCE_NAME=local-source',
     '-e', 'AZURE_CLIENT_ID=11111111-1111-1111-1111-111111111111',
     '-e', `IDENTITY_ENDPOINT=http://127.0.0.1:${mockPort}/identity`,
@@ -155,7 +187,7 @@ test('pinned gateway: Azure identity, authentication, inference, streaming and t
     await delay(100);
   }
   assert.ok(started, `Gateway did not become ready:\n${output}`);
-  const completion = (authorization, overrides = {}) => fetch(`${base}/v1/chat/completions`, {
+  const completion = (authorization, overrides = {}, path = '/v1/chat/completions') => fetch(`${base}${path}`, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
@@ -239,5 +271,85 @@ test('pinned gateway: Azure identity, authentication, inference, streaming and t
       assert.ok(!payload.includes(Buffer.from(secret)), `OTLP captured sensitive value: ${secret}`);
       assert.ok(!output.includes(secret), `Gateway logs captured sensitive value: ${secret}`);
     }
+  });
+  await t.test('Entra route rejects invalid JWTs and unauthorized principals without API-key fallback', async () => {
+    const count = upstreamRequests.length;
+    const otherKey = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey;
+    for (const [name, credential, status] of [
+      ['missing', undefined, 401],
+      ['legacy API key', apiKey, 401],
+      ['malformed', 'not-a-jwt', 401],
+      ['wrong signature', jwt({}, otherKey), 401],
+      ['wrong issuer', jwt({ iss: 'https://other-issuer.example' }), 401],
+      ['wrong audience', jwt({ aud: 'other-api' }), 401],
+      ['expired', jwt({ exp: Math.floor(Date.now() / 1000) - 3600 }), 401],
+      ['unknown identity', jwt({ oid: 'other-user' }), 403],
+      ['missing delegated scope', jwt({ scp: 'other.scope' }), 403],
+      ['missing identity', jwt({ oid: undefined }), 403],
+    ]) {
+      const response = await completion(credential ? `Bearer ${credential}` : undefined, {}, '/entra/v1/chat/completions');
+      assert.equal(response.status, status, `${name}: ${await response.text()}`);
+    }
+    assert.equal(upstreamRequests.length, count);
+  });
+  await t.test('delegated users and autonomous agents use gateway identity upstream', async () => {
+    for (const claims of [{}, { idtyp: 'app', scp: undefined }]) {
+      const callerToken = jwt(claims);
+      const response = await completion(`Bearer ${callerToken}`, {}, '/entra/v1/chat/completions');
+      assert.equal(response.status, 200, await response.clone().text());
+      assert.equal((await response.json()).choices[0].message.content, 'Hello tutor');
+      const upstream = upstreamRequests.at(-1);
+      assert.equal(upstream.headers.authorization, `Bearer ${token}`);
+      assert.equal(upstream.url.pathname, '/openai/v1/chat/completions');
+      assert.equal(upstream.data.model, 'gpt-5.4-nano');
+      assert.ok(!output.includes(callerToken));
+    }
+  });
+  await t.test('Entra route preserves streaming and upstream errors', async () => {
+    const authorization = `Bearer ${jwt({ idtyp: 'app', scp: undefined })}`;
+    const streamed = await completion(authorization, { stream: true }, '/entra/v1/chat/completions');
+    assert.equal(streamed.status, 200, await streamed.clone().text());
+    assert.match(streamed.headers.get('content-type'), /text\/event-stream/);
+    const events = (await streamed.text()).split('\n').filter((line) => line.startsWith('data: '));
+    assert.equal(events.at(-1), 'data: [DONE]');
+    const chunks = events.slice(0, -1).map((line) => JSON.parse(line.slice(6)));
+    assert.equal(chunks.map((chunk) => chunk.choices[0].delta.content || '').join(''), 'Hello tutor');
+    const failed = await completion(authorization, {
+      messages: [{ role: 'user', content: 'upstream-error' }],
+    }, '/entra/v1/chat/completions');
+    assert.equal(failed.status, 429, await failed.text());
+  });
+  await t.test('delegated route requires the allowed human, agent actor and delegated scope', async () => {
+    const count = upstreamRequests.length;
+    for (const [name, credential, status] of [
+      ['missing token', undefined, 401],
+      ['app-only token', jwt({ idtyp: 'app', scp: undefined }), 403],
+      ['disallowed user', jwt({ oid: 'other-user' }), 403],
+      ['disallowed actor', jwt({ azp: 'other-agent' }), 403],
+      ['missing actor', jwt({ azp: undefined }), 403],
+      ['missing scope', jwt({ scp: undefined }), 403],
+    ]) {
+      const response = await completion(
+        credential ? `Bearer ${credential}` : undefined, {}, '/delegated/v1/chat/completions',
+      );
+      assert.equal(response.status, status, `${name}: ${await response.text()}`);
+    }
+    assert.equal(upstreamRequests.length, count);
+    const callerToken = jwt();
+    const allowed = await completion(`Bearer ${callerToken}`, {}, '/delegated/v1/chat/completions');
+    assert.equal(allowed.status, 200, await allowed.clone().text());
+    assert.equal((await allowed.json()).choices[0].message.content, 'Hello tutor');
+    assert.equal(upstreamRequests.length, count + 1);
+    assert.equal(upstreamRequests.at(-1).headers.authorization, `Bearer ${token}`);
+    assert.equal(upstreamRequests.at(-1).url.pathname, '/openai/v1/chat/completions');
+    assert.ok(!output.includes(callerToken));
+    const streamed = await completion(`Bearer ${callerToken}`, { stream: true }, '/delegated/v1/chat/completions');
+    assert.equal(streamed.status, 200);
+    assert.ok((await streamed.text()).includes('data: [DONE]'));
+    const deniedUpstream = await completion(`Bearer ${callerToken}`, {
+      messages: [{ role: 'user', content: 'upstream-error' }],
+    }, '/delegated/v1/chat/completions');
+    assert.equal(deniedUpstream.status, 429);
+    await deniedUpstream.text();
   });
 });

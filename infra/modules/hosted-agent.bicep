@@ -6,6 +6,7 @@ targetScope = 'resourceGroup'
 param agentPrincipalId string
 param keyVaultName string
 param appInsightsName string
+param grantSecretRead bool = true
 
 resource vault 'Microsoft.KeyVault/vaults@2024-11-01' existing = {
   name: keyVaultName
@@ -20,7 +21,7 @@ resource insights 'Microsoft.Insights/components@2020-02-02' existing = {
   name: appInsightsName
 }
 
-resource secretReader 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+resource secretReader 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (grantSecretRead) {
   name: guid(gatewayKey.id, agentPrincipalId, 'Key Vault Secrets User')
   scope: gatewayKey
   properties: {

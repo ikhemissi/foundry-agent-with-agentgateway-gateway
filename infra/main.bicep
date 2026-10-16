@@ -29,6 +29,33 @@ param gatewayImage string = 'cr.agentgateway.dev/agentgateway:v1.6.0@sha256:9d3e
 
 param tags object = {}
 
+@description('Optional Entra API application ID from the separate infra/entra.bicep deployment.')
+param gatewayEntraClientId string = ''
+
+@description('Latest hosted Agent ID, recorded by its postdeploy hook. Agent ID client and principal identifiers are identical.')
+param hostedAgentPrincipalId string = ''
+
+@allowed([
+  'entra'
+  'entra_delegated'
+])
+@description('Hosted Entra mode. Delegated mode requires a gateway token forwarded by a trusted OBO backend.')
+param hostedGatewayAuthMode string = 'entra_delegated'
+
+@description('Optional OAuth client application for the prompt ModelGateway connection.')
+param promptGatewayClientId string = ''
+
+param promptGatewayPrincipalId string = ''
+
+@secure()
+param promptGatewayClientSecret string = ''
+
+var allowedGatewayPrincipalIds = concat(
+  [principalId],
+  empty(hostedAgentPrincipalId) ? [] : [hostedAgentPrincipalId],
+  empty(promptGatewayPrincipalId) ? [] : [promptGatewayPrincipalId]
+)
+
 var resourceTags = union(tags, {
   'azd-env-name': environmentName
 })
@@ -127,6 +154,9 @@ module containerApps './modules/container-apps.bicep' = {
     apiKeySecretUri: keyVault.outputs.apiKeySecretUri
     workspaceId: monitoring.outputs.workspaceId
     appInsightsConnectionString: monitoring.outputs.connectionString
+    gatewayEntraClientId: gatewayEntraClientId
+    allowedPrincipalIds: allowedGatewayPrincipalIds
+    delegatedAgentClientId: hostedAgentPrincipalId
   }
 }
 
@@ -139,6 +169,9 @@ module modelConnection './modules/model-connection.bicep' = {
     gatewayEndpoint: containerApps.outputs.endpoint
     gatewayApiKey: gatewayApiKey
     modelDeploymentName: sourceFoundry.outputs.modelDeploymentName
+    gatewayEntraClientId: gatewayEntraClientId
+    promptGatewayClientId: promptGatewayClientId
+    promptGatewayClientSecret: promptGatewayClientSecret
   }
 }
 
@@ -146,6 +179,13 @@ output AZURE_LOCATION string = location
 output AZURE_RESOURCE_GROUP string = resourceGroup.name
 output AGENTGATEWAY_ENDPOINT string = containerApps.outputs.endpoint
 output AGENTGATEWAY_CONTAINER_APP_NAME string = containerApps.outputs.name
+output AGENTGATEWAY_ENTRA_CLIENT_ID string = gatewayEntraClientId
+output AGENTGATEWAY_AUTHORIZED_USER_ID string = principalId
+output AGENTGATEWAY_AUTH_MODE string = empty(gatewayEntraClientId) ? 'api_key' : hostedGatewayAuthMode
+output AGENTGATEWAY_HOSTED_BASE_URL string = '${containerApps.outputs.endpoint}${empty(gatewayEntraClientId) ? '/v1' : hostedGatewayAuthMode == 'entra_delegated' ? '/delegated/v1' : '/entra/v1'}'
+output AGENTGATEWAY_TOKEN_SCOPE string = empty(gatewayEntraClientId) ? '' : 'api://${gatewayEntraClientId}/.default'
+output PROMPT_GATEWAY_CLIENT_ID string = promptGatewayClientId
+output PROMPT_GATEWAY_PRINCIPAL_ID string = promptGatewayPrincipalId
 output SOURCE_FOUNDRY_NAME string = sourceFoundry.outputs.name
 output SOURCE_FOUNDRY_PROJECT_ENDPOINT string = sourceFoundry.outputs.projectEndpoint
 output SOURCE_AZURE_OPENAI_RESOURCE_NAME string = sourceFoundry.outputs.name

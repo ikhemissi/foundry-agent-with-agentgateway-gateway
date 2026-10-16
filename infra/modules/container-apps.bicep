@@ -10,6 +10,13 @@ param sourceAccountName string
 param apiKeySecretUri string
 param workspaceId string
 param appInsightsConnectionString string
+param gatewayEntraClientId string = ''
+param allowedPrincipalIds array = []
+param delegatedAgentClientId string = ''
+
+var baseGatewayConfig = loadTextContent('../../agentgateway/config.yaml')
+var entraGatewayConfig = loadTextContent('../../agentgateway/entra.yaml')
+var gatewayConfig = empty(gatewayEntraClientId) ? baseGatewayConfig : '${baseGatewayConfig}\n${entraGatewayConfig}'
 
 resource environment 'Microsoft.App/managedEnvironments@2025-01-01' = {
   name: 'cae-agw-${suffix}'
@@ -59,7 +66,7 @@ resource gateway 'Microsoft.App/containerApps@2025-01-01' = {
           name: 'gateway-config'
           // ACA secret volumes also support non-sensitive configuration.
           #disable-next-line use-secure-value-for-secure-inputs
-          value: loadTextContent('../../agentgateway/config.yaml')
+          value: gatewayConfig
         }
         {
           name: 'otel-config'
@@ -89,6 +96,26 @@ resource gateway 'Microsoft.App/containerApps@2025-01-01' = {
             {
               name: 'SOURCE_AZURE_OPENAI_RESOURCE_NAME'
               value: sourceAccountName
+            }
+            {
+              name: 'AZURE_TENANT_ID'
+              value: tenant().tenantId
+            }
+            {
+              name: 'AGENTGATEWAY_ENTRA_CLIENT_ID'
+              value: gatewayEntraClientId
+            }
+            {
+              name: 'AGENTGATEWAY_ALLOWED_PRINCIPAL_IDS'
+              value: string(allowedPrincipalIds)
+            }
+            {
+              name: 'AGENTGATEWAY_DELEGATED_AGENT_CLIENT_ID'
+              value: delegatedAgentClientId
+            }
+            {
+              name: 'AGENTGATEWAY_CONFIG_REVISION'
+              value: uniqueString(gatewayConfig)
             }
             {
               name: 'OTEL_SERVICE_NAME'

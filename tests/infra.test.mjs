@@ -35,6 +35,11 @@ test('deployment keeps gateway credentials secure through every module boundary'
   }
   assert.ok(!JSON.stringify(template.outputs).includes("parameters('gatewayApiKey')"));
   assert.ok(!JSON.stringify(app).includes("parameters('gatewayApiKey')"));
+  assert.equal(template.parameters.promptGatewayClientSecret.type.toLowerCase(), 'securestring');
+  assert.equal(moduleTemplate('consumer-model-connection').parameters.promptGatewayClientSecret.type.toLowerCase(), 'securestring');
+  assert.equal(deployment('consumer-model-connection').properties.parameters.promptGatewayClientSecret.value,
+    "[parameters('promptGatewayClientSecret')]");
+  assert.ok(!JSON.stringify(template.outputs).includes("parameters('promptGatewayClientSecret')"));
 });
 
 test('only the source account receives the pinned model deployment', () => {
@@ -117,7 +122,7 @@ test('health probes do not invoke a model or expose the admin listener', () => {
   assert.ok(!gateway.probes.some((probe) => probe.httpGet?.port === 15000));
 });
 
-test('both containers mount the exact checked-in configuration', async () => {
+test('both containers mount checked-in configuration with an opt-in Entra route', async () => {
   for (const [secretName, file, container] of [
     ['gateway-config', 'agentgateway/config.yaml', gateway],
     ['otel-config', 'monitoring/otel-collector.yaml', collector],
@@ -125,7 +130,18 @@ test('both containers mount the exact checked-in configuration', async () => {
     const secret = app.properties.configuration.secrets.find((entry) => entry.name === secretName);
     const variable = /^\[variables\('([^']+)'\)\]$/.exec(secret.value);
     const content = variable ? moduleTemplate('gateway-container-apps').variables[variable[1]] : secret.value;
-    assert.equal(content, await readFile(new URL(file, root), 'utf8'));
+    const source = await readFile(new URL(file, root), 'utf8');
+    if (secretName === 'gateway-config') {
+      assert.equal(moduleTemplate('gateway-container-apps').variables.baseGatewayConfig, source);
+      const overlay = await readFile(new URL('agentgateway/entra.yaml', root), 'utf8');
+      assert.equal(moduleTemplate('gateway-container-apps').variables.entraGatewayConfig, overlay);
+      assert.ok(content.includes("variables('baseGatewayConfig')"));
+      assert.ok(content.includes("variables('entraGatewayConfig')"));
+      assert.ok(content.includes("parameters('gatewayEntraClientId')"));
+      assert.equal(moduleTemplate('gateway-container-apps').parameters.gatewayEntraClientId.defaultValue, '');
+    } else {
+      assert.equal(content, source);
+    }
     const mount = container.volumeMounts.find((entry) => entry.volumeName === secretName);
     assert.ok(mount);
     const volume = app.properties.template.volumes.find((entry) => entry.name === mount.volumeName);
@@ -134,17 +150,73 @@ test('both containers mount the exact checked-in configuration', async () => {
   }
 });
 
+test('Entra ingress is tenant- and audience-bound with an explicit identity allowlist', async () => {
+  const config = await readFile(new URL('agentgateway/entra.yaml', root), 'utf8');
+  assert.ok(config.includes('mode: strict'));
+  assert.ok(config.includes('audiences: ["$AGENTGATEWAY_ENTRA_CLIENT_ID"]'));
+  assert.ok(config.includes('jwt.oid in $AGENTGATEWAY_ALLOWED_PRINCIPAL_IDS'));
+  assert.ok(config.includes('jwt.idtyp == "app"'));
+  assert.ok(config.includes('"gateway.invoke" in jwt.scp.split(" ")'));
+  assert.ok(!config.includes('passthrough:'));
+  assert.equal(gateway.env.find((entry) => entry.name === 'AZURE_TENANT_ID').value, '[tenant().tenantId]');
+  assert.equal(gateway.env.find((entry) => entry.name === 'AGENTGATEWAY_ENTRA_CLIENT_ID').value, "[parameters('gatewayEntraClientId')]");
+  assert.equal(gateway.env.find((entry) => entry.name === 'AGENTGATEWAY_ALLOWED_PRINCIPAL_IDS').value, "[string(parameters('allowedPrincipalIds'))]");
+});
+
+test('hosted delegation has a separate actor-bound route while prompt OAuth remains app-only', async () => {
+  const config = await readFile(new URL('agentgateway/entra.yaml', root), 'utf8');
+  const delegated = config.split('  - name: entra-inference')[0];
+  assert.ok(delegated.includes('/delegated/v1/chat/completions'));
+  assert.ok(delegated.includes('jwt.azp == "$AGENTGATEWAY_DELEGATED_AGENT_CLIENT_ID"'));
+  assert.ok(delegated.includes('jwt.oid in $AGENTGATEWAY_ALLOWED_PRINCIPAL_IDS'));
+  assert.ok(delegated.includes('"gateway.invoke" in jwt.scp.split(" ")'));
+  assert.ok(!delegated.includes('jwt.idtyp == "app"'));
+  assert.equal(gateway.env.find((entry) => entry.name === 'AGENTGATEWAY_DELEGATED_AGENT_CLIENT_ID').value,
+    "[parameters('delegatedAgentClientId')]");
+  assert.equal(deployment('gateway-container-apps').properties.parameters.delegatedAgentClientId.value,
+    "[parameters('hostedAgentPrincipalId')]");
+  assert.equal(template.parameters.hostedGatewayAuthMode.defaultValue, 'entra_delegated');
+  assert.deepEqual(template.parameters.hostedGatewayAuthMode.allowedValues, ['entra', 'entra_delegated']);
+  assert.match(template.outputs.AGENTGATEWAY_AUTH_MODE.value, /parameters\('hostedGatewayAuthMode'\)/);
+  assert.match(template.outputs.AGENTGATEWAY_HOSTED_BASE_URL.value, /\/delegated\/v1/);
+  const parameters = JSON.parse(await readFile(new URL('infra/main.parameters.json', root), 'utf8')).parameters;
+  assert.equal(parameters.hostedGatewayAuthMode.value, '${HOSTED_GATEWAY_AUTH_MODE=entra_delegated}');
+});
+
 test('model connection uses the /v1 base URL, bearer formatting and the public alias', () => {
-  const connection = single('consumer-model-connection', 'Microsoft.CognitiveServices/accounts/projects/connections');
+  const connection = resources('consumer-model-connection', 'Microsoft.CognitiveServices/accounts/projects/connections')
+    .find((resource) => resource.properties.authType === 'ApiKey');
   assert.match(connection.name, /agentgateway-gateway/);
   assert.equal(connection.properties.category, 'ModelGateway');
   assert.equal(connection.properties.authType, 'ApiKey');
   assert.match(connection.properties.target, /\/v1/);
   assert.equal(connection.properties.credentials.key, "[parameters('gatewayApiKey')]");
-  assert.equal(connection.properties.metadata.deploymentInPath, 'false');
-  assert.match(connection.properties.metadata.authConfig, /Authorization/);
-  assert.match(connection.properties.metadata.authConfig, /Bearer \{api_key\}/);
-  assert.match(connection.properties.metadata.models, /gpt-5.4-nano/);
+  assert.match(connection.properties.metadata, /variables\('modelMetadata'\)/);
+  assert.match(connection.properties.metadata, /Authorization/);
+  assert.match(connection.properties.metadata, /Bearer \{api_key\}/);
+  const metadata = moduleTemplate('consumer-model-connection').variables.modelMetadata;
+  assert.equal(metadata.deploymentInPath, 'false');
+  assert.match(metadata.models, /gpt-5.4-nano/);
+});
+
+test('prompt OAuth connection uses Entra client credentials without an API key or user-delegation claim', () => {
+  const connection = resources('consumer-model-connection', 'Microsoft.CognitiveServices/accounts/projects/connections')
+    .find((resource) => resource.properties.authType === 'OAuth2');
+  assert.equal(connection.condition, "[variables('useOAuth')]");
+  assert.equal(connection.properties.category, 'ModelGateway');
+  assert.match(connection.properties.target, /\/entra\/v1/);
+  assert.deepEqual(connection.properties.credentials, {
+    clientId: "[parameters('promptGatewayClientId')]",
+    clientSecret: "[parameters('promptGatewayClientSecret')]",
+  });
+  assert.match(connection.properties.tokenUrl, /login\.microsoftonline\.com/);
+  assert.match(connection.properties.tokenUrl, /oauth2\/v2\.0\/token/);
+  assert.deepEqual(connection.properties.scopes, ["[format('api://{0}/.default', parameters('gatewayEntraClientId'))]"]);
+  assert.equal(connection.properties.metadata, "[variables('modelMetadata')]");
+  assert.ok(!JSON.stringify(connection).includes('gatewayApiKey'));
+  const allowed = deployment('gateway-container-apps').properties.parameters.allowedPrincipalIds.value;
+  assert.equal(allowed, "[variables('allowedGatewayPrincipalIds')]");
+  assert.match(template.variables.allowedGatewayPrincipalIds, /promptGatewayPrincipalId/);
 });
 
 test('monitoring requires Entra ingestion and sends diagnostics to the shared workspace', () => {
@@ -217,6 +289,7 @@ test('deployment ordering waits for identity, secret access and source model res
 test('azd parameters use process-supplied secrets and explicit demo tags', async () => {
   const parameters = JSON.parse(await readFile(new URL('infra/main.parameters.json', root), 'utf8')).parameters;
   assert.equal(parameters.gatewayApiKey.value, '${AGENTGATEWAY_API_KEY}');
+  assert.equal(parameters.promptGatewayClientSecret.value, '${PROMPT_GATEWAY_CLIENT_SECRET=}');
   assert.equal(parameters.principalId.value, '${AZURE_PRINCIPAL_ID}');
   assert.deepEqual(parameters.tags.value, { CostControl: 'Ignore', SecurityControl: 'Ignore' });
   assert.deepEqual(template.parameters.location.allowedValues, ['eastus', 'uksouth', 'swedencentral']);

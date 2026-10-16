@@ -17,6 +17,24 @@
     "modelCapacity": {
       "value": "${MODEL_CAPACITY=10}"
     },
+    "gatewayEntraClientId": {
+      "value": "${AGENTGATEWAY_ENTRA_CLIENT_ID=}"
+    },
+    "hostedAgentPrincipalId": {
+      "value": "${HOSTED_AGENT_PRINCIPAL_ID=}"
+    },
+    "hostedGatewayAuthMode": {
+      "value": "${HOSTED_GATEWAY_AUTH_MODE=entra_delegated}"
+    },
+    "promptGatewayClientId": {
+      "value": "${PROMPT_GATEWAY_CLIENT_ID=}"
+    },
+    "promptGatewayPrincipalId": {
+      "value": "${PROMPT_GATEWAY_PRINCIPAL_ID=}"
+    },
+    "promptGatewayClientSecret": {
+      "value": "${PROMPT_GATEWAY_CLIENT_SECRET=}"
+    },
     "tags": {
       "value": {
         "CostControl": "Ignore",

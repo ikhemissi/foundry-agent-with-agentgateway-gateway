@@ -4,6 +4,7 @@
 !.env.example
 infra/*.json
 !infra/main.parameters.json
+!infra/bicepconfig.json
 .venv/
 __pycache__/
 *.pyc
