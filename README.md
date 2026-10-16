@@ -362,8 +362,9 @@ workspace-backed Application Insights component and Log Analytics workspace.
 Local-auth ingestion is disabled.
 
 Both Foundry projects connect with **Project Managed Identity**; each project's
-system-assigned identity receives **Monitoring Metrics Publisher** on that
-component only. The connections are created after their role assignments.
+system-assigned identity receives **Monitoring Metrics Publisher** for ingestion
+and **Monitoring Reader** for Foundry Insights, scoped to that component only.
+The connections are created after their role assignments.
 Project-managed trace ingestion is a Foundry preview. The connection uses API
 `2026-09-01`; its `ProjectManagedIdentity` authentication is ahead of the published
 Bicep types, so the modules narrowly suppress the missing-schema warning.

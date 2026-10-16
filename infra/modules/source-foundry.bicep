@@ -89,6 +89,16 @@ resource deployerAccess 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   }
 }
 
+resource projectInsightsReader 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(appInsights.id, project.id, 'Monitoring Reader')
+  scope: appInsights
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '43d0d8ad-25c7-4714-9337-8ba259a9fe05')
+    principalId: project.identity.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
 resource projectTelemetryPublisher 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   name: guid(appInsights.id, project.id, 'Monitoring Metrics Publisher')
   scope: appInsights
@@ -116,6 +126,7 @@ resource projectAppInsights 'Microsoft.CognitiveServices/accounts/projects/conne
     }
   }
   dependsOn: [
+    projectInsightsReader
     projectTelemetryPublisher
   ]
 }

@@ -238,7 +238,7 @@ test('monitoring requires Entra ingestion and sends diagnostics to the shared wo
   assert.equal(collector.env.find((entry) => entry.name === 'AZURE_CLIENT_ID').value, "[parameters('gatewayClientId')]");
 });
 
-test('both projects use their own identity to publish traces to shared Application Insights', () => {
+test('both projects use their own identity to publish traces and read shared Application Insights', () => {
   for (const name of ['source-foundry', 'consumer-foundry']) {
     const project = single(name, 'Microsoft.CognitiveServices/accounts/projects');
     const connection = single(name, 'Microsoft.CognitiveServices/accounts/projects/connections');
@@ -269,6 +269,15 @@ test('both projects use their own identity to publish traces to shared Applicati
     assert.equal(publisher.properties.principalType, 'ServicePrincipal');
     assert.equal(publisher.properties.principalId,
       `[reference(resourceId('Microsoft.CognitiveServices/accounts/projects', format('foundry-${name === 'source-foundry' ? 'source' : 'consumer'}-{0}', parameters('suffix')), '${projectId}'), '2025-06-01', 'full').identity.principalId]`);
+    const readers = resources(name, 'Microsoft.Authorization/roleAssignments')
+      .filter((role) => role.properties.roleDefinitionId.includes('43d0d8ad-25c7-4714-9337-8ba259a9fe05'));
+    assert.equal(readers.length, 1);
+    const reader = readers[0];
+    assert.equal(reader.scope, connection.properties.target);
+    assert.equal(reader.properties.principalType, 'ServicePrincipal');
+    assert.equal(reader.properties.principalId, publisher.properties.principalId);
+    assert.ok(connection.dependsOn.some((dependency) =>
+      dependency.includes('Microsoft.Authorization/roleAssignments') && dependency.includes("'Monitoring Reader'")));
     assert.ok(connection.dependsOn.some((dependency) =>
       dependency.includes('Microsoft.Authorization/roleAssignments') && dependency.includes('Monitoring Metrics Publisher')));
     assert.ok(deployment(name).dependsOn.some((dependency) => dependency.includes("'shared-monitoring'")));
