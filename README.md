@@ -51,6 +51,8 @@ Clients invoke the hosted tutor through Foundry's Responses protocol. Its Python
 runtime calls agentgateway Chat Completions with the alias `gpt-5.4-nano`,
 without using a ModelGateway connection. Entra mode supports user-via-agent
 delegation; explicit app-only and legacy API-key modes remain available.
+Responses-only `include` projections from clients such as the Foundry playground
+are logged and ignored rather than forwarded to Chat Completions.
 
 ```mermaid
 flowchart LR

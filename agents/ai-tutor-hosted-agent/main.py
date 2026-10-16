@@ -7,13 +7,13 @@ from contextlib import ExitStack
 from contextvars import ContextVar
 from pathlib import Path
 from types import TracebackType
-from typing import Self
+from typing import Any, Self
 from urllib.parse import urlparse
 
 from agent_framework import Agent
 from agent_framework.observability import enable_instrumentation
 from agent_framework.openai import OpenAIChatCompletionClient
-from agent_framework_foundry_hosting import ResponsesHostServer
+from agent_framework_foundry_hosting import HostedResponseRequest, ResponsesHostServer
 from azure.identity import DefaultAzureCredential
 from azure.core.credentials import TokenCredential
 from azure.keyvault.secrets import SecretClient
@@ -76,6 +76,18 @@ class GatewayChatCompletionClient(OpenAIChatCompletionClient):
         traceback: TracebackType | None,
     ) -> None:
         await self.client.close()
+
+
+def prepare_chat_completion_options(
+    _request: HostedResponseRequest, options: dict[str, Any],
+) -> dict[str, Any]:
+    if "include" in options:
+        options = dict(options)
+        options.pop("include")
+        logging.getLogger(__name__).warning(
+            "Responses 'include' projections are not supported by the Chat Completions gateway and will be ignored."
+        )
+    return options
 
 
 def create_agent(
@@ -173,11 +185,14 @@ def main() -> None:
             # Each request owns its OpenAI client and its mutable authentication state.
             server = ResponsesHostServer(
                 lambda: create_agent(base_url, get_api_key), configure_observability=None,
+                prepare_options=prepare_chat_completion_options,
             )
             server.add_middleware(DelegatedGatewayAuth)
         else:
             agent = create_agent(base_url, get_api_key)
-            server = ResponsesHostServer(agent, configure_observability=None)
+            server = ResponsesHostServer(
+                agent, configure_observability=None, prepare_options=prepare_chat_completion_options,
+            )
         server.run()
 
 
