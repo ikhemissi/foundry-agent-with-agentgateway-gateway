@@ -5,7 +5,7 @@
       "label": "Test project scaffold",
       "type": "process",
       "command": "node",
-      "args": ["--test", "tests/agent.test.mjs", "tests/deployment.test.mjs"],
+      "args": ["--test", "tests/agent.test.mjs", "tests/deployment.test.mjs", "tests/migration.test.mjs"],
       "options": {
         "cwd": "${workspaceFolder}"
       },

@@ -7,16 +7,17 @@ param gatewayImage string
 param gatewayIdentityId string
 param gatewayClientId string
 param sourceAccountName string
-param apiKeySecretUri string
 param workspaceId string
 param appInsightsConnectionString string
-param gatewayEntraClientId string = ''
-param allowedPrincipalIds array = []
+param gatewayEntraClientId string
+param authorizedUserId string
+param promptGatewayClientId string
+param promptGatewayPrincipalId string
 param delegatedAgentClientId string = ''
 
 var baseGatewayConfig = loadTextContent('../../agentgateway/config.yaml')
 var entraGatewayConfig = loadTextContent('../../agentgateway/entra.yaml')
-var gatewayConfig = empty(gatewayEntraClientId) ? baseGatewayConfig : '${baseGatewayConfig}\n${entraGatewayConfig}'
+var gatewayConfig = '${baseGatewayConfig}\n${entraGatewayConfig}'
 
 resource environment 'Microsoft.App/managedEnvironments@2025-01-01' = {
   name: 'cae-agw-${suffix}'
@@ -58,11 +59,6 @@ resource gateway 'Microsoft.App/containerApps@2025-01-01' = {
       }
       secrets: [
         {
-          name: 'agentgateway-api-key'
-          keyVaultUrl: apiKeySecretUri
-          identity: gatewayIdentityId
-        }
-        {
           name: 'gateway-config'
           // ACA secret volumes also support non-sensitive configuration.
           #disable-next-line use-secure-value-for-secure-inputs
@@ -86,10 +82,6 @@ resource gateway 'Microsoft.App/containerApps@2025-01-01' = {
           ]
           env: [
             {
-              name: 'AGENTGATEWAY_API_KEY'
-              secretRef: 'agentgateway-api-key'
-            }
-            {
               name: 'AZURE_CLIENT_ID'
               value: gatewayClientId
             }
@@ -106,8 +98,16 @@ resource gateway 'Microsoft.App/containerApps@2025-01-01' = {
               value: gatewayEntraClientId
             }
             {
-              name: 'AGENTGATEWAY_ALLOWED_PRINCIPAL_IDS'
-              value: string(allowedPrincipalIds)
+              name: 'AGENTGATEWAY_AUTHORIZED_USER_ID'
+              value: authorizedUserId
+            }
+            {
+              name: 'PROMPT_GATEWAY_CLIENT_ID'
+              value: promptGatewayClientId
+            }
+            {
+              name: 'PROMPT_GATEWAY_PRINCIPAL_ID'
+              value: promptGatewayPrincipalId
             }
             {
               name: 'AGENTGATEWAY_DELEGATED_AGENT_CLIENT_ID'

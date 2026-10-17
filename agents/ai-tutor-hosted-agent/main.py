@@ -1,9 +1,7 @@
-import asyncio
 import json
 import logging
 import os
 from collections.abc import Awaitable, Callable
-from contextlib import ExitStack
 from contextvars import ContextVar
 from pathlib import Path
 from types import TracebackType
@@ -15,8 +13,6 @@ from agent_framework.observability import enable_instrumentation
 from agent_framework.openai import OpenAIChatCompletionClient
 from agent_framework_foundry_hosting import HostedResponseRequest, ResponsesHostServer
 from azure.identity import DefaultAzureCredential
-from azure.core.credentials import TokenCredential
-from azure.keyvault.secrets import SecretClient
 from azure.monitor.opentelemetry import configure_azure_monitor
 from openai import AsyncOpenAI, DefaultAsyncHttpxClient
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
@@ -92,20 +88,20 @@ def prepare_chat_completion_options(
 
 def create_agent(
     base_url: str,
-    get_api_key: Callable[[], Awaitable[str]],
+    get_access_token: Callable[[], Awaitable[str]],
     definition_path: Path = Path(__file__).with_name("agent.json"),
 ) -> Agent:
     endpoint = urlparse(base_url)
     if (
         endpoint.scheme != "https"
         or not endpoint.hostname
-        or endpoint.path.rstrip("/") not in ("/v1", "/entra/v1", "/delegated/v1")
+        or endpoint.path.rstrip("/") != "/delegated/v1"
         or endpoint.username
         or endpoint.password
         or endpoint.query
         or endpoint.fragment
     ):
-        raise ValueError("AGENTGATEWAY_BASE_URL must be an HTTPS gateway /v1, /entra/v1 or /delegated/v1 endpoint.")
+        raise ValueError("AGENTGATEWAY_BASE_URL must be an HTTPS gateway /delegated/v1 endpoint.")
     definition = json.loads(definition_path.read_text(encoding="utf-8"))
     for field in ("name", "model", "instructions"):
         if not isinstance(definition.get(field), str) or not definition[field].strip():
@@ -115,7 +111,7 @@ def create_agent(
     client = GatewayChatCompletionClient(
         model=definition["model"],
         async_client=AsyncOpenAI(
-            base_url=base_url, api_key=get_api_key,
+            base_url=base_url, api_key=get_access_token,
             http_client=DefaultAsyncHttpxClient(follow_redirects=False),
         ),
     )
@@ -126,50 +122,15 @@ def create_agent(
     )
 
 
-async def read_gateway_key(vault: SecretClient) -> str:
-    # RBAC is assigned after deployment; resolve the credential on model requests.
-    secret = await asyncio.to_thread(vault.get_secret, "agentgateway-api-key")
-    if not secret.value or not secret.value.strip():
-        raise RuntimeError("Key Vault returned an empty agentgateway-api-key.")
-    return secret.value
-
-
-async def read_gateway_token(credential: TokenCredential, scope: str) -> str:
-    if not scope.startswith("api://") or not scope.endswith("/.default"):
-        raise ValueError("AGENTGATEWAY_TOKEN_SCOPE must be an api:// application /.default scope.")
-    token = await asyncio.to_thread(credential.get_token, scope)
-    if not token.token or not token.token.strip():
-        raise RuntimeError("Entra returned an empty gateway access token.")
-    return token.token
-
-
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     logging.getLogger("azure.core.pipeline.policies.http_logging_policy").setLevel(logging.WARNING)
-    auth_mode = os.environ.get("AGENTGATEWAY_AUTH_MODE", "api_key")
-    if auth_mode not in ("api_key", "entra", "entra_delegated"):
-        raise ValueError("AGENTGATEWAY_AUTH_MODE must be api_key, entra or entra_delegated.")
+    if os.environ.get("AGENTGATEWAY_AUTH_MODE", "entra_delegated") != "entra_delegated":
+        raise ValueError("Only delegated Entra authentication is supported; remove the obsolete AGENTGATEWAY_AUTH_MODE setting.")
     base_url = os.environ["AGENTGATEWAY_BASE_URL"]
-    if auth_mode == "entra_delegated" and urlparse(base_url).path.rstrip("/") != "/delegated/v1":
+    if urlparse(base_url).path.rstrip("/") != "/delegated/v1":
         raise ValueError("Delegated authentication requires the gateway /delegated/v1 endpoint.")
-    with ExitStack() as stack:
-        credential = stack.enter_context(DefaultAzureCredential())
-        if auth_mode == "entra_delegated":
-            get_api_key = read_delegated_gateway_token
-        elif auth_mode == "entra":
-            scope = os.environ["AGENTGATEWAY_TOKEN_SCOPE"]
-
-            async def get_api_key() -> str:
-                return await read_gateway_token(credential, scope)
-        else:
-            vault = stack.enter_context(SecretClient(
-                vault_url=f"https://{os.environ['AZURE_KEY_VAULT_NAME']}.vault.azure.net",
-                credential=credential,
-            ))
-
-            async def get_api_key() -> str:
-                return await read_gateway_key(vault)
-
+    with DefaultAzureCredential() as credential:
         os.environ["OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_SANITIZE_FIELDS"] = ",".join(filter(None, [
             os.environ.get("OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_SANITIZE_FIELDS"),
             "authorization", DELEGATED_TOKEN_HEADER,
@@ -181,18 +142,12 @@ def main() -> None:
         )
         enable_instrumentation(enable_sensitive_data=False, enable_message_events=False)
 
-        if auth_mode == "entra_delegated":
-            # Each request owns its OpenAI client and its mutable authentication state.
-            server = ResponsesHostServer(
-                lambda: create_agent(base_url, get_api_key), configure_observability=None,
-                prepare_options=prepare_chat_completion_options,
-            )
-            server.add_middleware(DelegatedGatewayAuth)
-        else:
-            agent = create_agent(base_url, get_api_key)
-            server = ResponsesHostServer(
-                agent, configure_observability=None, prepare_options=prepare_chat_completion_options,
-            )
+        # Each request owns its OpenAI client and its mutable authentication state.
+        server = ResponsesHostServer(
+            lambda: create_agent(base_url, read_delegated_gateway_token), configure_observability=None,
+            prepare_options=prepare_chat_completion_options,
+        )
+        server.add_middleware(DelegatedGatewayAuth)
         server.run()
 
 

@@ -15,7 +15,7 @@ routes:
           url: "https://login.microsoftonline.com/$AZURE_TENANT_ID/discovery/v2.0/keys"
       authorization:
         rules:
-          - allow: 'jwt.tid == "$AZURE_TENANT_ID" && jwt.oid in $AGENTGATEWAY_ALLOWED_PRINCIPAL_IDS && has(jwt.azp) && jwt.azp == "$AGENTGATEWAY_DELEGATED_AGENT_CLIENT_ID" && has(jwt.scp) && "gateway.invoke" in jwt.scp.split(" ")'
+          - allow: 'jwt.tid == "$AZURE_TENANT_ID" && jwt.oid == "$AGENTGATEWAY_AUTHORIZED_USER_ID" && (!has(jwt.idtyp) || jwt.idtyp != "app") && has(jwt.azp) && jwt.azp == "$AGENTGATEWAY_DELEGATED_AGENT_CLIENT_ID" && has(jwt.scp) && "gateway.invoke" in jwt.scp.split(" ")'
     backends:
       - ai:
           name: delegated-source-model
@@ -49,7 +49,7 @@ routes:
           url: "https://login.microsoftonline.com/$AZURE_TENANT_ID/discovery/v2.0/keys"
       authorization:
         rules:
-          - allow: 'jwt.tid == "$AZURE_TENANT_ID" && jwt.oid in $AGENTGATEWAY_ALLOWED_PRINCIPAL_IDS && ((has(jwt.idtyp) && jwt.idtyp == "app") || (has(jwt.scp) && "gateway.invoke" in jwt.scp.split(" ")))'
+          - allow: 'jwt.tid == "$AZURE_TENANT_ID" && jwt.oid == "$PROMPT_GATEWAY_PRINCIPAL_ID" && has(jwt.idtyp) && jwt.idtyp == "app" && has(jwt.azp) && jwt.azp == "$PROMPT_GATEWAY_CLIENT_ID" && !has(jwt.scp)'
     backends:
       - ai:
           name: entra-source-model

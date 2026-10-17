@@ -3,7 +3,6 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
@@ -187,7 +186,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                 "APPLICATIONINSIGHTS_CONNECTION_STRING": "test-destination",
             }),
             patch.object(main, "DefaultAzureCredential") as credentials,
-            patch.object(main, "SecretClient") as vault,
             patch.object(main, "configure_azure_monitor"),
             patch.object(main, "enable_instrumentation"),
             patch.object(main, "create_agent") as create,
@@ -200,7 +198,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             server.return_value.add_middleware.assert_called_once_with(main.DelegatedGatewayAuth)
             self.assertIs(server.call_args.kwargs["prepare_options"], main.prepare_chat_completion_options)
             credentials.return_value.__enter__.return_value.get_token.assert_not_called()
-            vault.assert_not_called()
             self.assertIn(main.DELEGATED_TOKEN_HEADER,
                           main.os.environ["OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_SANITIZE_FIELDS"])
 
@@ -216,8 +213,8 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         })
         self.assertEqual(service["protocols"], [{"protocol": "responses", "version": "2.0.0"}])
         self.assertEqual(service["env"]["AGENTGATEWAY_BASE_URL"], "${AGENTGATEWAY_HOSTED_BASE_URL}")
-        self.assertEqual(service["env"]["AGENTGATEWAY_AUTH_MODE"], "${AGENTGATEWAY_AUTH_MODE}")
-        self.assertEqual(service["env"]["AGENTGATEWAY_TOKEN_SCOPE"], "${AGENTGATEWAY_TOKEN_SCOPE}")
+        for removed in ["AGENTGATEWAY_AUTH_MODE", "AGENTGATEWAY_TOKEN_SCOPE", "AZURE_KEY_VAULT_NAME"]:
+            self.assertNotIn(removed, service["env"])
         self.assertNotIn("AGENTGATEWAY_API_KEY", service["env"])
         self.assertEqual(manifest["hooks"]["postdeploy"]["run"], "node scripts/deploy-prompt-agent.mjs")
         provision = manifest["hooks"]["postprovision"]["run"]
@@ -236,9 +233,9 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         for pattern in [".env", ".env.*", ".venv/", "test_*.py"]:
             self.assertIn(pattern, ignored)
 
-    async def test_inference_uses_gateway_alias_instructions_and_lazy_rotating_key(self):
+    async def test_inference_uses_gateway_alias_instructions_and_lazy_token_provider(self):
         requests = []
-        key = AsyncMock(side_effect=["first-gateway-key", "rotated-gateway-key"])
+        key = AsyncMock(side_effect=["first-user-token", "next-user-token"])
 
         def respond(request):
             requests.append(request)
@@ -256,9 +253,9 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             })
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as transport:
-            client = AsyncOpenAI(base_url="https://gateway.example/v1", api_key=key, http_client=transport)
+            client = AsyncOpenAI(base_url="https://gateway.example/delegated/v1", api_key=key, http_client=transport)
             with patch.object(main, "AsyncOpenAI", return_value=client):
-                agent = main.create_agent("https://gateway.example/v1", key)
+                agent = main.create_agent("https://gateway.example/delegated/v1", key)
             key.assert_not_awaited()
             for _ in range(2):
                 result = await agent.run("How do I solve 2x = 6?")
@@ -266,8 +263,8 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(requests), 2)
         self.assertEqual(key.await_count, 2)
-        for request, expected_key in zip(requests, ["first-gateway-key", "rotated-gateway-key"]):
-            self.assertEqual(str(request.url), "https://gateway.example/v1/chat/completions")
+        for request, expected_key in zip(requests, ["first-user-token", "next-user-token"]):
+            self.assertEqual(str(request.url), "https://gateway.example/delegated/v1/chat/completions")
             self.assertEqual(request.headers["authorization"], f"Bearer {expected_key}")
             body = json.loads(request.content)
             self.assertEqual(body["model"], "gpt-5.4-nano")
@@ -279,6 +276,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             "https://gateway.example/v1/chat/completions",
             "https://user:secret@gateway.example/v1", "https://gateway.example/v1?key=secret",
             "https://gateway.example/v1#fragment", "/v1",
+            "https://gateway.example/v1", "https://gateway.example/entra/v1",
         ]:
             with self.subTest(endpoint=endpoint), patch.object(main, "AsyncOpenAI") as client:
                 with self.assertRaisesRegex(ValueError, "HTTPS gateway"):
@@ -287,7 +285,6 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_responses_host_translates_client_requests_to_gateway_chat_completions(self):
         requests = []
-        key = AsyncMock(return_value="local-test-key")
 
         def respond(request):
             requests.append(request)
@@ -306,40 +303,37 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                 content="".join(chunks) + "data: [DONE]\n\n",
             )
 
-        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as upstream:
-            client = AsyncOpenAI(base_url="https://gateway.example/v1", api_key=key, http_client=upstream)
-            with patch.object(main, "AsyncOpenAI", return_value=client):
-                agent = main.create_agent("https://gateway.example/v1", key)
-            host = main.ResponsesHostServer(
-                agent, configure_observability=None, prepare_options=main.prepare_chat_completion_options,
-            )
-            async with httpx.AsyncClient(
-                transport=httpx.ASGITransport(app=host), base_url="http://local-agent",
-            ) as caller:
-                for stream in [False, True]:
-                    for include in [[], ["reasoning.encrypted_content"]]:
-                        with self.subTest(stream=stream, include=include):
-                            response = await caller.post("/responses", json={
-                                "input": "Solve 2x = 6", "stream": stream, "store": False,
-                                "include": include, "temperature": 0.2, "top_p": 0.8, "max_output_tokens": 100,
-                            })
-                            self.assertEqual(response.status_code, 200, response.text)
-                            if stream:
-                                self.assertIn("response.completed", response.text)
-                                self.assertNotIn("response.failed", response.text)
-                            else:
-                                result = response.json()
-                                self.assertEqual(result["object"], "response")
-                                self.assertEqual(result["status"], "completed", result)
-                            self.assertIn("Six divided by two", response.text)
-            self.assertEqual(len(requests), 4)
-            for request in requests:
-                self.assertEqual(str(request.url), "https://gateway.example/v1/chat/completions")
-                body = json.loads(request.content)
-                self.assertNotIn("include", body)
-                self.assertEqual(body["temperature"], 0.2)
-                self.assertEqual(body["top_p"], 0.8)
-                self.assertEqual(body["max_completion_tokens"], 100)
+        host, clients = self.delegated_host(respond)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=host), base_url="http://local-agent",
+        ) as caller:
+            for stream in [False, True]:
+                for include in [[], ["reasoning.encrypted_content"]]:
+                    with self.subTest(stream=stream, include=include):
+                        response = await caller.post("/responses", headers={
+                            main.DELEGATED_TOKEN_HEADER: "playground-user-token",
+                        }, json={
+                            "input": "Solve 2x = 6", "stream": stream, "store": False,
+                            "include": include, "temperature": 0.2, "top_p": 0.8, "max_output_tokens": 100,
+                        })
+                        self.assertEqual(response.status_code, 200, response.text)
+                        if stream:
+                            self.assertIn("response.completed", response.text)
+                            self.assertNotIn("response.failed", response.text)
+                        else:
+                            result = response.json()
+                            self.assertEqual(result["object"], "response")
+                            self.assertEqual(result["status"], "completed", result)
+                        self.assertIn("Six divided by two", response.text)
+        self.assertTrue(all(client.is_closed for client in clients))
+        self.assertEqual(len(requests), 4)
+        for request in requests:
+            self.assertEqual(str(request.url), "https://gateway.example/delegated/v1/chat/completions")
+            body = json.loads(request.content)
+            self.assertNotIn("include", body)
+            self.assertEqual(body["temperature"], 0.2)
+            self.assertEqual(body["top_p"], 0.8)
+            self.assertEqual(body["max_completion_tokens"], 100)
 
     def test_response_option_preparation_only_removes_include_without_mutating_input(self):
         for include in [[], ["reasoning.encrypted_content"]]:
@@ -361,78 +355,24 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                     with self.subTest(field=field, value=value):
                         path.write_text(json.dumps({**definition, field: value}))
                         with self.assertRaisesRegex(ValueError, field):
-                            main.create_agent("https://gateway.example/v1", AsyncMock(), path)
+                            main.create_agent("https://gateway.example/delegated/v1", AsyncMock(), path)
             path.write_text(json.dumps({**definition, "model": "connection/model"}))
             with self.assertRaisesRegex(ValueError, "direct gateway model alias"):
-                main.create_agent("https://gateway.example/v1", AsyncMock(), path)
+                main.create_agent("https://gateway.example/delegated/v1", AsyncMock(), path)
 
-    async def test_key_vault_read_is_lazy_and_empty_values_fail(self):
-        vault = Mock()
-        vault.get_secret.return_value = SimpleNamespace(value="gateway-key")
-        self.assertEqual(await main.read_gateway_key(vault), "gateway-key")
-        vault.get_secret.assert_called_once_with("agentgateway-api-key")
-        for value in [None, "", "   "]:
-            vault.get_secret.return_value = SimpleNamespace(value=value)
-            with self.assertRaisesRegex(RuntimeError, "empty agentgateway-api-key"):
-                await main.read_gateway_key(vault)
-
-    async def test_key_vault_errors_propagate(self):
-        vault = Mock()
-        vault.get_secret.side_effect = RuntimeError("access denied")
-        with self.assertRaisesRegex(RuntimeError, "access denied"):
-            await main.read_gateway_key(vault)
-
-    async def test_entra_tokens_are_requested_lazily_and_errors_do_not_fall_back_to_keys(self):
-        credential = Mock()
-        credential.get_token.return_value = SimpleNamespace(token="gateway-user-or-agent-token")
-        scope = "api://11111111-1111-1111-1111-111111111111/.default"
-        self.assertEqual(await main.read_gateway_token(credential, scope), "gateway-user-or-agent-token")
-        credential.get_token.assert_called_once_with(scope)
-        for value in [None, "", " "]:
-            credential.get_token.return_value = SimpleNamespace(token=value)
-            with self.assertRaisesRegex(RuntimeError, "empty gateway access token"):
-                await main.read_gateway_token(credential, scope)
-        for invalid in ["", "https://management.azure.com/.default", "api://application"]:
-            with self.assertRaisesRegex(ValueError, "TOKEN_SCOPE"):
-                await main.read_gateway_token(credential, invalid)
-        credential.get_token.side_effect = RuntimeError("token denied")
-        with self.assertRaisesRegex(RuntimeError, "token denied"):
-            await main.read_gateway_token(credential, scope)
-
-    async def test_entra_startup_does_not_open_key_vault(self):
-        with (
-            patch.dict(main.os.environ, {
-                "AGENTGATEWAY_AUTH_MODE": "entra",
-                "AGENTGATEWAY_TOKEN_SCOPE": "api://gateway/.default",
-                "AGENTGATEWAY_BASE_URL": "https://gateway.example/entra/v1",
-                "APPLICATIONINSIGHTS_CONNECTION_STRING": "test-destination",
-            }),
-            patch.object(main, "DefaultAzureCredential") as credential_factory,
-            patch.object(main, "SecretClient") as vault,
-            patch.object(main, "configure_azure_monitor"),
-            patch.object(main, "enable_instrumentation"),
-            patch.object(main, "create_agent") as create,
-            patch.object(main, "ResponsesHostServer") as server,
-        ):
-            main.main()
-            vault.assert_not_called()
-            credential = credential_factory.return_value.__enter__.return_value
-            credential.get_token.assert_not_called()
-            credential.get_token.return_value = SimpleNamespace(token="new-token")
-            self.assertEqual(await create.call_args.args[1](), "new-token")
-            credential.get_token.assert_called_once_with("api://gateway/.default")
-            self.assertIs(server.call_args.kwargs["prepare_options"], main.prepare_chat_completion_options)
+    def test_removed_authentication_modes_fail_at_startup(self):
+        for mode in ["api_key", "entra", "invalid"]:
+            with self.subTest(mode=mode), patch.dict(main.os.environ, {"AGENTGATEWAY_AUTH_MODE": mode}):
+                with self.assertRaisesRegex(ValueError, "Only delegated Entra"):
+                    main.main()
 
     def test_startup_keeps_explicit_identity_exporter_and_disables_message_capture(self):
         with (
             patch.dict(main.os.environ, {
-                "AGENTGATEWAY_BASE_URL": "https://gateway.example/v1",
-                "AGENTGATEWAY_AUTH_MODE": "api_key",
-                "AZURE_KEY_VAULT_NAME": "test-vault",
+                "AGENTGATEWAY_BASE_URL": "https://gateway.example/delegated/v1",
                 "APPLICATIONINSIGHTS_CONNECTION_STRING": "test-destination",
-            }),
+            }, clear=True),
             patch.object(main, "DefaultAzureCredential") as credential_factory,
-            patch.object(main, "SecretClient") as vault_factory,
             patch.object(main, "configure_azure_monitor") as configure,
             patch.object(main, "enable_instrumentation") as instrumentation,
             patch.object(main, "create_agent") as create,
@@ -444,10 +384,13 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                 connection_string="test-destination", credential=credential, enable_live_metrics=False,
             )
             instrumentation.assert_called_once_with(enable_sensitive_data=False, enable_message_events=False)
-            vault_factory.return_value.__enter__.return_value.get_secret.assert_not_called()
-            self.assertEqual(create.call_args.args[0], "https://gateway.example/v1")
+            create.assert_not_called()
+            factory = server.call_args.args[0]
+            factory()
+            self.assertEqual(create.call_args.args[0], "https://gateway.example/delegated/v1")
+            self.assertIs(create.call_args.args[1], main.read_delegated_gateway_token)
             server.assert_called_once_with(
-                create.return_value, configure_observability=None,
+                factory, configure_observability=None,
                 prepare_options=main.prepare_chat_completion_options,
             )
             server.return_value.run.assert_called_once_with()

@@ -5,7 +5,7 @@ const secretName = 'agentgateway-prompt-client-secret';
 
 export async function configurePromptGatewayEntra({ env, run = execFileSync, fetchImpl = fetch, now = new Date() } = {}) {
   for (const name of ['AZURE_KEY_VAULT_NAME', 'PROMPT_GATEWAY_CLIENT_ID', 'PROMPT_GATEWAY_PRINCIPAL_ID']) {
-    if (!env?.[name]?.trim()) throw new Error(`${name} is required; run configure-gateway-entra.mjs --include-prompt first.`);
+    if (!env?.[name]?.trim()) throw new Error(`${name} is required; bootstrap resources and run configure-gateway-entra.mjs first.`);
   }
   if (!/^[a-zA-Z][a-zA-Z0-9-]{1,22}[a-zA-Z0-9]$/.test(env.AZURE_KEY_VAULT_NAME)) {
     throw new Error('AZURE_KEY_VAULT_NAME must be a valid Key Vault name.');

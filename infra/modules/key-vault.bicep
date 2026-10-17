@@ -4,11 +4,7 @@ param location string
 param tags object
 param suffix string
 param principalId string
-param gatewayPrincipalId string
 param workspaceId string
-
-@secure()
-param gatewayApiKey string
 
 resource vault 'Microsoft.KeyVault/vaults@2024-11-01' = {
   name: 'kv-agw-${suffix}'
@@ -26,26 +22,6 @@ resource vault 'Microsoft.KeyVault/vaults@2024-11-01' = {
     enablePurgeProtection: true
     publicNetworkAccess: 'Enabled'
     accessPolicies: []
-  }
-}
-
-resource apiKey 'Microsoft.KeyVault/vaults/secrets@2024-11-01' = {
-  parent: vault
-  name: 'agentgateway-api-key'
-  tags: tags
-  properties: {
-    value: gatewayApiKey
-    contentType: 'agentgateway inference bearer credential'
-  }
-}
-
-resource gatewaySecretAccess 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(apiKey.id, gatewayPrincipalId, 'Key Vault Secrets User')
-  scope: apiKey
-  properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '4633458b-17de-408a-b874-0445c86b69e6')
-    principalId: gatewayPrincipalId
-    principalType: 'ServicePrincipal'
   }
 }
 
@@ -75,4 +51,3 @@ resource diagnostics 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' 
 }
 
 output name string = vault.name
-output apiKeySecretUri string = '${vault.properties.vaultUri}secrets/${apiKey.name}'

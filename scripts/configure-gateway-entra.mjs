@@ -1,9 +1,9 @@
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-export function configureGatewayEntra({ env, includePrompt = false, run = execFileSync } = {}) {
+export function configureGatewayEntra({ env, run = execFileSync } = {}) {
   for (const name of ['AZURE_ENV_NAME', 'AZURE_RESOURCE_GROUP', 'AZURE_SUBSCRIPTION_ID']) {
-    if (!env?.[name]?.trim()) throw new Error(`${name} is required; provision the Azure resources first.`);
+    if (!env?.[name]?.trim()) throw new Error(`${name} is required; bootstrap the Azure resources first.`);
   }
   const options = { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] };
   const az = (...args) => JSON.parse(run('az', [...args, '--output', 'json'], options));
@@ -37,7 +37,6 @@ export function configureGatewayEntra({ env, includePrompt = false, run = execFi
     environmentName: { value: env.AZURE_ENV_NAME },
     gatewayApplicationUniqueName: { value: gateway.uniqueName },
     promptApplicationUniqueName: { value: prompt.uniqueName },
-    includePromptApplication: { value: includePrompt || Boolean(prompt.clientId) },
     existingGatewayApi: { value: gateway.existing?.api ?? {} },
     existingGatewayOptionalClaims: { value: gateway.existing?.optionalClaims ?? {} },
     existingGatewayIdentifierUris: { value: gateway.existing?.identifierUris ?? [] },
@@ -54,7 +53,7 @@ export function configureGatewayEntra({ env, includePrompt = false, run = execFi
   if (!clientId || (gateway.clientId && clientId !== gateway.clientId)
       || (env.AGENTGATEWAY_ENTRA_PRINCIPAL_ID && outputs?.gatewayPrincipalId?.value !== env.AGENTGATEWAY_ENTRA_PRINCIPAL_ID)
       || (scopes.length && outputs?.invokeScopeId?.value !== scopes[0].id)
-      || ((includePrompt || prompt.clientId) && (!promptClientId || !promptPrincipalId))
+      || !promptClientId || !promptPrincipalId
       || (prompt.clientId && promptClientId !== prompt.clientId)
       || (env.PROMPT_GATEWAY_PRINCIPAL_ID && promptPrincipalId !== env.PROMPT_GATEWAY_PRINCIPAL_ID)) {
     throw new Error('Graph Bicep did not return the expected application and service principal IDs.');
@@ -63,8 +62,7 @@ export function configureGatewayEntra({ env, includePrompt = false, run = execFi
     ['AGENTGATEWAY_ENTRA_CLIENT_ID', 'gatewayClientId'],
     ['AGENTGATEWAY_ENTRA_PRINCIPAL_ID', 'gatewayPrincipalId'],
     ['AGENTGATEWAY_INVOKE_SCOPE_ID', 'invokeScopeId'],
-    ...((includePrompt || prompt.clientId)
-      ? [['PROMPT_GATEWAY_CLIENT_ID', 'promptClientId'], ['PROMPT_GATEWAY_PRINCIPAL_ID', 'promptPrincipalId']] : []),
+    ['PROMPT_GATEWAY_CLIENT_ID', 'promptClientId'], ['PROMPT_GATEWAY_PRINCIPAL_ID', 'promptPrincipalId'],
   ];
   for (const [, output] of mappings) {
     if (!outputs[output]?.value) throw new Error(`Graph Bicep did not return ${output}.`);
@@ -79,9 +77,9 @@ export function configureGatewayEntra({ env, includePrompt = false, run = execFi
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
   try {
     const args = process.argv.slice(2);
-    if (args.some((argument) => argument !== '--include-prompt')) throw new Error('Only --include-prompt is supported.');
+    if (args.length) throw new Error('No arguments are supported; both gateway and prompt registrations are required.');
     const env = JSON.parse(execFileSync('azd', ['env', 'get-values', '--output', 'json'], { encoding: 'utf8' }));
-    configureGatewayEntra({ env, includePrompt: args.includes('--include-prompt') });
+    configureGatewayEntra({ env });
   } catch (error) {
     console.error(`Gateway Entra configuration failed: ${error.message}`);
     process.exitCode = 1;

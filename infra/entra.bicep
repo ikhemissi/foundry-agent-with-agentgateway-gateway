@@ -11,8 +11,6 @@ param gatewayApplicationUniqueName string = '${subscription().subscriptionId}-${
 
 param promptApplicationUniqueName string = '${subscription().subscriptionId}-${environmentName}-prompt-gateway'
 
-param includePromptApplication bool = false
-
 @description('Preserve the existing gateway.invoke ID when adopting an application.')
 param gatewayInvokeScopeId string = guid(subscription().subscriptionId, environmentName, 'gateway.invoke')
 
@@ -77,18 +75,18 @@ resource gatewayPrincipal 'Microsoft.Graph/servicePrincipals@v1.0' = {
   appId: gatewayApplication.appId
 }
 
-resource promptApplication 'Microsoft.Graph/applications@v1.0' = if (includePromptApplication) {
+resource promptApplication 'Microsoft.Graph/applications@v1.0' = {
   uniqueName: promptApplicationUniqueName
   displayName: '${environmentName}-prompt-gateway'
   signInAudience: 'AzureADMyOrg'
 }
 
-resource promptPrincipal 'Microsoft.Graph/servicePrincipals@v1.0' = if (includePromptApplication) {
-  appId: promptApplication!.appId
+resource promptPrincipal 'Microsoft.Graph/servicePrincipals@v1.0' = {
+  appId: promptApplication.appId
 }
 
 output gatewayClientId string = gatewayApplication.appId
 output gatewayPrincipalId string = gatewayPrincipal.id
 output invokeScopeId string = gatewayInvokeScopeId
-output promptClientId string = includePromptApplication ? promptApplication!.appId : ''
-output promptPrincipalId string = includePromptApplication ? promptPrincipal!.id : ''
+output promptClientId string = promptApplication.appId
+output promptPrincipalId string = promptPrincipal.id

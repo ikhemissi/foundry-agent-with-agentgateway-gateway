@@ -23,9 +23,6 @@ services:
         version: 2.0.0
     env:
       AGENTGATEWAY_BASE_URL: ${AGENTGATEWAY_HOSTED_BASE_URL}
-      AGENTGATEWAY_AUTH_MODE: ${AGENTGATEWAY_AUTH_MODE}
-      AGENTGATEWAY_TOKEN_SCOPE: ${AGENTGATEWAY_TOKEN_SCOPE}
-      AZURE_KEY_VAULT_NAME: ${AZURE_KEY_VAULT_NAME}
       APPLICATIONINSIGHTS_CONNECTION_STRING: ${APPLICATIONINSIGHTS_CONNECTION_STRING}
       OTEL_SERVICE_NAME: ai-tutor-hosted-agent
       OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT: 'false'
@@ -43,11 +40,10 @@ hooks:
     shell: sh
     run: |
       set -eu
-      if [ -n "${PROMPT_GATEWAY_CLIENT_ID:-}" ]; then
-        test -n "${AGENTGATEWAY_ENTRA_CLIENT_ID:-}" || { echo "AGENTGATEWAY_ENTRA_CLIENT_ID is required for prompt OAuth authentication." >&2; exit 1; }
-        test -n "${PROMPT_GATEWAY_PRINCIPAL_ID:-}" || { echo "PROMPT_GATEWAY_PRINCIPAL_ID is required for prompt OAuth authentication." >&2; exit 1; }
-        test -n "${PROMPT_GATEWAY_CLIENT_SECRET:-}" || { echo "Supply PROMPT_GATEWAY_CLIENT_SECRET from Key Vault through the process environment." >&2; exit 1; }
-      fi
+      test -n "${AGENTGATEWAY_ENTRA_CLIENT_ID:-}" || { echo "AGENTGATEWAY_ENTRA_CLIENT_ID is required; configure Entra registrations first." >&2; exit 1; }
+      test -n "${PROMPT_GATEWAY_CLIENT_ID:-}" || { echo "PROMPT_GATEWAY_CLIENT_ID is required; configure Entra registrations first." >&2; exit 1; }
+      test -n "${PROMPT_GATEWAY_PRINCIPAL_ID:-}" || { echo "PROMPT_GATEWAY_PRINCIPAL_ID is required for prompt OAuth authentication." >&2; exit 1; }
+      test -n "${PROMPT_GATEWAY_CLIENT_SECRET:-}" || { echo "Supply PROMPT_GATEWAY_CLIENT_SECRET from Key Vault through the process environment." >&2; exit 1; }
   postprovision:
     shell: sh
     run: |

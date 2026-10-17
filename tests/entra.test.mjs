@@ -32,9 +32,9 @@ test('application adoption keys are stable and both service principals reference
   assert.equal(promptPrincipal.properties.appId, "[reference('promptApplication').appId]");
   assert.deepEqual(gatewayPrincipal.dependsOn, ['gatewayApplication']);
   assert.deepEqual(promptPrincipal.dependsOn, ['promptApplication']);
-  assert.equal(template.parameters.includePromptApplication.defaultValue, false);
+  assert.ok(!template.parameters.includePromptApplication);
   for (const resource of [promptApplication, promptPrincipal]) {
-    assert.equal(resource.condition, "[parameters('includePromptApplication')]");
+    assert.ok(!Object.hasOwn(resource, 'condition'));
   }
 });
 

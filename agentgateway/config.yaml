@@ -12,23 +12,3 @@ gateways:
   default:
     port: 4000
     bindAddress: 0.0.0.0
-llm:
-  policies:
-    apiKey:
-      mode: strict
-      keys:
-        - key: "$AGENTGATEWAY_API_KEY"
-  models:
-    - name: gpt-5.4-nano
-      provider: azure
-      auth:
-        azure:
-          explicitConfig:
-            managedIdentity:
-              userAssignedIdentity:
-                clientId: "$AZURE_CLIENT_ID"
-      params:
-        azureResourceName: "$SOURCE_AZURE_OPENAI_RESOURCE_NAME"
-        azureResourceType: openAI
-        azureApiVersion: v1
-        model: gpt-5.4-nano

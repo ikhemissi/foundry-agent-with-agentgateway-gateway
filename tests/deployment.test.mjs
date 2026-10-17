@@ -89,24 +89,25 @@ test('HTTP errors, non-persistence and mismatching persisted definitions fail de
 
 const env = {
   AZURE_SUBSCRIPTION_ID: 'subscription', AZURE_RESOURCE_GROUP: 'rg-test',
-  CONSUMER_FOUNDRY_PROJECT_ENDPOINT: endpoint, AZURE_KEY_VAULT_NAME: 'vault',
+  CONSUMER_FOUNDRY_PROJECT_ENDPOINT: endpoint,
   APPLICATIONINSIGHTS_NAME: 'insights',
+  AZURE_ENV_NAME: 'test', AGENTGATEWAY_CONTAINER_APP_NAME: 'gateway',
 };
 const principal = '11111111-1111-1111-1111-111111111111';
 
 test('hosted postdeploy grants access to the returned agent identity without reading any secret', () => {
   const commands = [];
   grantHostedAgentAccess({ env, run: (command, args) => {
-    assert.equal(command, 'az');
-    commands.push(args);
+    commands.push([command, ...args]);
     return commands.length === 1 ? `${principal}\n` : '';
   } });
-  assert.equal(commands.length, 2);
+  assert.equal(commands.length, 5);
   assert.ok(commands[0].includes('versions.latest.instance_identity.principal_id'));
   assert.ok(commands[1].includes(`agentPrincipalId=${principal}`));
-  assert.ok(commands[1].includes('keyVaultName=vault'));
   assert.ok(commands[1].includes('appInsightsName=insights'));
   assert.ok(!commands.flat().includes('get-secret'));
+  assert.ok(commands[3].includes(`AGENTGATEWAY_DELEGATED_AGENT_CLIENT_ID=${principal}`));
+  assert.ok(commands[4].includes('HOSTED_AGENT_PRINCIPAL_ID'));
 });
 
 test('hosted access hook fails on missing configuration, invalid identity and CLI errors', () => {
@@ -124,32 +125,18 @@ test('hosted access hook fails on missing configuration, invalid identity and CL
   assert.throws(() => grantHostedAgentAccess({ env, run: () => { throw new Error('CLI failure'); } }), /CLI failure/);
 });
 
-test('Entra postdeploy authorizes the actual agent identity and removes its key-read permission', () => {
-  for (const authMode of ['entra', 'entra_delegated']) {
+test('postdeploy is idempotent when the delegated actor is already configured', () => {
     const commands = [];
     const entraEnv = {
-      ...env, AZURE_ENV_NAME: 'test', AGENTGATEWAY_AUTH_MODE: authMode,
-      AGENTGATEWAY_CONTAINER_APP_NAME: 'gateway', AGENTGATEWAY_AUTHORIZED_USER_ID: principal,
-      PROMPT_GATEWAY_PRINCIPAL_ID: '22222222-2222-2222-2222-222222222222',
+      ...env,
     };
     grantHostedAgentAccess({ env: entraEnv, run: (command, args) => {
       commands.push([command, ...args]);
-      return commands.length === 1 ? `${principal}\n` : '';
+      return commands.length === 1 || args.includes('show') ? `${principal}\n` : '';
     } });
-    assert.ok(commands[1].includes('grantSecretRead=false'));
-    const update = commands.find((args) => args.includes('--set-env-vars'));
-    assert.equal(update[update.indexOf('--container-name') + 1], 'agentgateway');
-    assert.ok(update.includes(`AGENTGATEWAY_ALLOWED_PRINCIPAL_IDS=${JSON.stringify([principal, principal, entraEnv.PROMPT_GATEWAY_PRINCIPAL_ID])}`));
-    assert.ok(update.includes(`AGENTGATEWAY_DELEGATED_AGENT_CLIENT_ID=${principal}`));
+    assert.ok(!commands.some((args) => args.includes('--set-env-vars')));
     assert.ok(commands.some((args) => args[0] === 'azd' && args.includes('HOSTED_AGENT_PRINCIPAL_ID')));
-    const revoke = commands.at(-1);
-    assert.deepEqual(revoke.slice(0, 4), ['az', 'role', 'assignment', 'delete']);
-    assert.ok(revoke.includes(principal));
-    assert.ok(revoke.some((value) => value.endsWith('/secrets/agentgateway-api-key')));
-  }
-  assert.throws(() => grantHostedAgentAccess({
-    env: { ...env, AGENTGATEWAY_AUTH_MODE: 'invalid' },
-  }), /AGENTGATEWAY_AUTH_MODE/);
+    assert.ok(!JSON.stringify(commands).includes('keyVault'));
 });
 
 const promptEnv = {
@@ -239,7 +226,7 @@ test('prompt OAuth setup propagates CLI failures and revokes a new password if s
   assert.equal(revoked, 'password-key');
 });
 
-test('project preprovision validates prompt OAuth inputs without requiring them in legacy mode', async () => {
+test('project preprovision requires all prompt OAuth inputs without a legacy mode', async () => {
   const yaml = await readFile(new URL('../azure.yaml', import.meta.url), 'utf8');
   const rootHooks = yaml.split('\nhooks:\n')[1];
   const script = rootHooks.split('    run: |\n')[1].split('\n  postprovision:')[0]
@@ -249,9 +236,9 @@ test('project preprovision validates prompt OAuth inputs without requiring them 
     AGENTGATEWAY_ENTRA_CLIENT_ID: principal, PROMPT_GATEWAY_CLIENT_SECRET: 'synthetic-secret',
   };
   const execute = (values) => execFileSync('/bin/sh', ['-c', script], { env: values, stdio: 'pipe' });
-  execute({});
+  assert.throws(() => execute({}), /AGENTGATEWAY_ENTRA_CLIENT_ID/);
   execute(env);
-  for (const name of ['PROMPT_GATEWAY_PRINCIPAL_ID', 'AGENTGATEWAY_ENTRA_CLIENT_ID', 'PROMPT_GATEWAY_CLIENT_SECRET']) {
+  for (const name of Object.keys(env)) {
     assert.throws(() => execute({ ...env, [name]: '' }), new RegExp(name));
   }
 });
@@ -327,33 +314,28 @@ test('Entra deployment adopts existing identities and passes the stable manifest
   assert.deepEqual(parameters.existingGatewayApi.value, api);
   assert.deepEqual(parameters.existingGatewayIdentifierUris.value, ['api://existing']);
   assert.deepEqual(parameters.existingGatewayOptionalClaims.value, { idToken: [{ name: 'email' }] });
-  assert.equal(parameters.includePromptApplication.value, true);
+  assert.ok(!parameters.includePromptApplication);
   assert.equal(calls.filter((args) => args[0] === 'azd').length, 5);
 });
 
-test('Entra deployment is declarative for fresh environments and does not enable prompt OAuth implicitly', () => {
-  for (const includePrompt of [false, true]) {
+test('Entra deployment always provisions both required registrations declaratively', () => {
     const calls = [];
     configureGatewayEntra({
-      env: entraEnv, includePrompt,
+      env: entraEnv,
       run: (command, args) => {
         calls.push([command, ...args]);
         if (command === 'az') {
           assert.ok(args.includes('deployment'), 'Fresh registrations must be created only by Bicep');
           const parameters = JSON.parse(args[args.indexOf('--parameters') + 1]);
-          assert.equal(parameters.includePromptApplication.value, includePrompt);
+          assert.ok(!parameters.includePromptApplication);
           assert.equal(parameters.gatewayApplicationUniqueName.value, `${principal}-test-agentgateway`);
           assert.ok(!Object.hasOwn(parameters, 'gatewayInvokeScopeId'));
-          return JSON.stringify({ properties: { outputs: {
-            ...entraOutputs,
-            ...(!includePrompt ? { promptClientId: { value: '' }, promptPrincipalId: { value: '' } } : {}),
-          } } });
+          return JSON.stringify({ properties: { outputs: entraOutputs } });
         }
         return '';
       },
     });
-    assert.equal(calls.filter((args) => args[0] === 'azd').length, includePrompt ? 5 : 3);
-  }
+    assert.equal(calls.filter((args) => args[0] === 'azd').length, 5);
 });
 
 test('Entra redeployment keeps immutable adoption keys and refuses changed identity outputs', () => {
@@ -392,7 +374,7 @@ test('Entra deployment validates every required output before persisting environ
     const outputs = { ...entraOutputs };
     delete outputs[name];
     assert.throws(() => configureGatewayEntra({
-      env: entraEnv, includePrompt: true,
+      env: entraEnv,
       run: (command) => {
         assert.equal(command, 'az', 'Incomplete deployment outputs must not be persisted in azd');
         return JSON.stringify({ properties: { outputs } });
@@ -418,18 +400,15 @@ test('Entra adoption rejects changed application IDs and ambiguous scope IDs bef
   }
 });
 
-test('hosted access Bicep grants only secret read and telemetry publishing', () => {
+test('hosted access Bicep grants only telemetry publishing, never secret access', () => {
   const template = JSON.parse(execFileSync('az', [
     'bicep', 'build', '--file',
     fileURLToPath(new URL('../infra/modules/hosted-agent.bicep', import.meta.url)), '--stdout',
   ], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
-  assert.equal(template.resources.length, 2);
-  const [secret, telemetry] = template.resources;
-  assert.equal(template.parameters.grantSecretRead.defaultValue, true);
-  assert.equal(secret.condition, "[parameters('grantSecretRead')]");
-  assert.match(secret.scope, /Microsoft.KeyVault\/vaults\/secrets/);
-  assert.match(secret.scope, /agentgateway-api-key/);
-  assert.match(secret.properties.roleDefinitionId, /4633458b-17de-408a-b874-0445c86b69e6/);
+  assert.equal(template.resources.length, 1);
+  const [telemetry] = template.resources;
+  assert.ok(!template.parameters.grantSecretRead);
+  assert.ok(!template.parameters.keyVaultName);
   assert.match(telemetry.properties.roleDefinitionId, /3913510d-42f4-4e42-8a64-420c390055eb/);
   for (const resource of template.resources) {
     assert.equal(resource.type, 'Microsoft.Authorization/roleAssignments');

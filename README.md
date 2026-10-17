@@ -1,312 +1,245 @@
-# agentgateway on Azure Container Apps with Microsoft Foundry
+# Microsoft Foundry agents with agentgateway
 
-An azd + Bicep demo integrating **Microsoft Foundry and agentgateway in both
-directions**: Foundry agents access models through agentgateway, which uses
-managed identity to call a model hosted in Foundry.
+An azd + Bicep demonstration of **Microsoft Foundry and agentgateway integration
+in both directions**: Foundry agents call models through agentgateway, and the
+gateway uses managed identity to call a model hosted in Foundry.
 
-Two independent AI tutors demonstrate the agent-side workflows:
+Two independent AI tutors demonstrate different integration capabilities:
 
-- **Prompt agent:** Foundry sends inference requests through a ModelGateway
-  connection to agentgateway.
-- **Hosted agent:** Python code using Microsoft Agent Framework runs in Foundry
-  and calls agentgateway's OpenAI-compatible API directly.
+| Tutor | Foundry integration | Identity at agentgateway |
+| --- | --- | --- |
+| Prompt agent | Managed ModelGateway connection using OAuth2 client credentials | Dedicated prompt-client application |
+| Hosted agent | Python + Microsoft Agent Framework, exposed through Foundry Responses | Human user acting through the hosted Entra Agent ID |
 
 Both target `gpt-5.4-nano` in a separate **source Foundry account**. The
-**consumer Foundry account** hosts the tutors without local model capacity.
+**consumer Foundry account** hosts both tutors without local model capacity.
 Neither tutor invokes the other or bypasses the gateway.
 
-> **Status:** deployed and smoke-tested in UK South with both independent tutors.
-> Trace ingestion/correlation, credential rotation, and identity refresh still
-> require end-to-end validation.
+**Inference is Entra-only.** There is no shared gateway API key, API-key
+connection, or hosted app-only authentication mode. The prompt OAuth client
+secret remains necessary for the managed ModelGateway connection; it is not a
+shared inference key.
+
+> **Validation:** the identity-only gateway and hosted runtime are tested locally,
+> including streaming and denial cases. The previous deployment used hosted
+> app-only authentication. Genuine Agent ID user-via-agent inference was verified
+> separately, but this repository does not deploy the trusted sign-in/OBO backend.
+> Do not treat ordinary playground access as a working delegated caller.
 
 ## Architecture
 
-### Prompt agent: Foundry-managed gateway integration
-
-The tutor selects `agentgateway-gateway/gpt-5.4-nano`. Foundry resolves the
-connection and authenticates with an Entra application token (when enabled below)
-or the default stored bearer key. The gateway
-authenticates to the source model using managed identity and Azure RBAC.
+### Prompt tutor: Foundry-managed model access
 
 ```mermaid
 flowchart LR
-    User["Learner / client"]
-    subgraph Consumer["Consumer Foundry - consumer-project"]
-        Tutor["ai-tutor-prompt-agent"]
-        Connection["agentgateway-gateway<br/>ModelGateway connection"]
-        Tutor -->|"agentgateway-gateway/gpt-5.4-nano"| Connection
-    end
-    Gateway["agentgateway<br/>Azure Container Apps"]
-    subgraph Source["Source Foundry"]
-        Model["gpt-5.4-nano"]
-    end
+    User["Learner"]
+    Tutor["Foundry prompt tutor"]
+    Connection["ModelGateway connection"]
+    Gateway["agentgateway on Container Apps"]
+    Model["Source Foundry model"]
     User -->|"Entra authentication"| Tutor
-    Connection -->|"HTTPS + Entra app token or bearer key"| Gateway
+    Tutor -->|"agentgateway-gateway/gpt-5.4-nano"| Connection
+    Connection -->|"OAuth2 application token"| Gateway
     Gateway -->|"Managed identity + Azure RBAC"| Model
 ```
 
-### Hosted agent: direct OpenAI-compatible integration
+Foundry obtains an application token for the gateway API using the dedicated
+prompt client's credentials. The `/entra/v1/chat/completions` route requires
+that application's service principal (`oid`), client ID (`azp`), and app-only
+token type. It rejects delegated users and the hosted agent's app-only identity.
+The prompt caller's human identity is **not** propagated to agentgateway.
 
-Clients invoke the hosted tutor through Foundry's Responses protocol. Its Python
-runtime calls agentgateway Chat Completions with the alias `gpt-5.4-nano`,
-without using a ModelGateway connection. Entra mode supports user-via-agent
-delegation; explicit app-only and legacy API-key modes remain available.
-Responses-only `include` projections from clients such as the Foundry playground
-are logged and ignored rather than forwarded to Chat Completions.
+### Hosted tutor: user-via-agent model access
 
 ```mermaid
 flowchart LR
-    User["Learner / client"]
-    subgraph Consumer["Consumer Foundry - consumer-project"]
-        Hosted["ai-tutor-hosted-agent<br/>Python + Microsoft Agent Framework"]
-    end
-    Vault["Azure Key Vault"]
-    Gateway["agentgateway<br/>Azure Container Apps"]
-    subgraph Source["Source Foundry"]
-        Model["gpt-5.4-nano"]
-    end
-    User -->|"Entra authentication<br/>Foundry Responses protocol"| Hosted
-    Hosted -.->|"API-key mode: read gateway key"| Vault
-    Hosted -->|"OpenAI Chat Completions<br/>Delegated user + agent token"| Gateway
+    User["Learner"]
+    Backend["Trusted sign-in / Agent ID OBO backend"]
+    Hosted["Foundry hosted tutor"]
+    Gateway["agentgateway on Container Apps"]
+    Model["Source Foundry model"]
+    User --> Backend
+    Backend -->|"Foundry invocation + forwarded delegated token"| Hosted
+    Hosted -->|"User-via-agent gateway token"| Gateway
     Gateway -->|"Managed identity + Azure RBAC"| Model
 ```
 
-Both paths use the same gateway deployment, whose identity also resolves its
-inference key from Key Vault. Both Foundry projects, the gateway, and hosted
-tutor target shared Application Insights; resource diagnostics target its Log Analytics workspace.
-See [Shared monitoring](#shared-monitoring) for current coverage.
+The `/delegated/v1/chat/completions` route validates the signature, tenant,
+audience, authorized human (`oid`), hosted Agent ID actor (`azp`), and
+`gateway.invoke` scope. App-only tokens cannot use it. The sample authorizes the
+deploying human; adapt that explicit policy for your application.
+
+The gateway's managed identity, not the incoming token, authenticates upstream
+to the source model. Both Foundry accounts disable local API-key authentication.
 
 ## Requirements
 
 ### Tooling and capacity
 
-- Azure CLI 2.73+, Azure Developer CLI 1.35+, and Bicep 0.36.1+ (`az bicep install`).
-- Foundry agents azd extension 1.0.0-beta.18+
-  (`azd extension install azure.ai.agents`).
-- Bash, OpenSSL, and Node.js 20+ for deployment hooks and tests.
-- Python 3.13 for local hosted-agent development; remote builds do not require it.
-- Subscription quota for `gpt-5.4-nano` using the `GlobalStandard` SKU.
+- Azure CLI 2.73+, Azure Developer CLI 1.35+, and Bicep 0.36.1+.
+- Foundry agents azd extension 1.0.0-beta.18+.
+- Bash and Node.js 20+ for deployment hooks and tests.
+- Python 3.13 for local hosted development; remote builds do not require it.
+- Subscription quota for `gpt-5.4-nano`, version `2026-03-17`, `GlobalStandard`.
+- East US (`eastus`, default), UK South (`uksouth`), or Sweden Central
+  (`swedencentral`), subject to service availability and quota.
 
-### Permissions
+### Permissions and delegated caller
 
 - **Azure provisioning:** permission to provision resources and assign roles:
-  Owner, or Contributor
-  plus an appropriate Azure RBAC administrator role.
-- **Optional Entra authentication:** permission to create and manage application
-  registrations, service principals, and application credentials, such as
-  Application Administrator, Cloud Application Administrator, or equivalent
-  permissions.
-- **Optional hosted user delegation:** the trusted backend needs Foundry
-  invocation access and the
+  Owner, or Contributor plus an appropriate Azure RBAC administrator role.
+- **Entra provisioning:** permission to manage applications, service principals,
+  and credentials, such as Application Administrator, Cloud Application
+  Administrator, or equivalent permissions.
+- **Hosted caller:** a trusted backend performing the
+  [Agent ID OBO exchange](https://learn.microsoft.com/en-us/entra/agent-id/agent-on-behalf-of-oauth-flow).
+  Configure the hosted blueprint's user-facing API, delegated gateway permission,
+  consent, and permission inheritance. Use a federated credential or certificate
+  for that backend. These are external prerequisites, not deployed by this sample.
+- The trusted backend needs Foundry invocation access and the
   `Microsoft.CognitiveServices/accounts/AIServices/agents/endpoints/UserIdentityImpersonation/action`
-  data action to represent the user.
+  data action when representing the user.
 
-Entra directory roles do not replace Azure RBAC permissions. Contributor alone
-cannot create role assignments. The deployment scripts assume a signed-in human
-account; CI service-principal deployment is not configured.
+Entra directory permissions do not replace Azure RBAC. Contributor alone cannot
+create role assignments. Scripts assume a signed-in human; CI service-principal
+deployment is not configured.
 
 ## Deploy
 
-| Region | Location |
-| --- | --- |
-| **East US (default)** | `eastus` |
-| UK South | `uksouth` |
-| Sweden Central | `swedencentral` |
+Fresh deployments have an explicit bootstrap stage: the vault must exist before
+the prompt OAuth credential can be stored. No temporary API-key deployment is
+needed.
 
-The deployment and both inference paths have been validated in UK South.
-Check regional availability and quota before deploying elsewhere.
+### 1. Bootstrap shared resources
 
 ```bash
 az login
 azd auth login
+azd extension install azure.ai.agents
+azd env new agentgateway-demo --location uksouth --subscription <subscription-id>
+azd env set AZURE_PRINCIPAL_ID "$(az ad signed-in-user show --query id -o tsv)"
 
-# Use uksouth or swedencentral instead if needed.
-azd env new agentgateway-demo --location eastus --subscription <subscription-id>
-AGENTGATEWAY_API_KEY="sk-$(openssl rand -hex 32)" azd up
+environment="$(azd env get-value AZURE_ENV_NAME)"
+location="$(azd env get-value AZURE_LOCATION)"
+principal="$(azd env get-value AZURE_PRINCIPAL_ID)"
+
+az deployment sub create --name "$environment-bootstrap" --location "$location" \
+  --template-file infra/bootstrap.bicep \
+  --parameters environmentName="$environment" location="$location" principalId="$principal" \
+  'tags={"CostControl":"Ignore","SecurityControl":"Ignore"}' --output none
+
+azd env set AZURE_RESOURCE_GROUP "$(az deployment sub show \
+  --name "$environment-bootstrap" --query properties.outputs.resourceGroupName.value -o tsv)"
+azd env set AZURE_KEY_VAULT_NAME "$(az deployment sub show \
+  --name "$environment-bootstrap" --query properties.outputs.keyVaultName.value -o tsv)"
 ```
 
-`azd up` provisions infrastructure and deploys both tutors. Lifecycle hooks
-deploy the prompt agent; native azd code deployment remotely builds the hosted
-agent, then a Bicep hook grants its identity access. Deployment requires neither
-local Docker nor a project-owned container registry.
+[bootstrap.bicep](infra/bootstrap.bicep) reuses the same names and modules as the
+full deployment for the resource group, gateway identity, monitoring, vault,
+and deployer access. It does not create an inference endpoint.
+Allow RBAC propagation before storing credentials.
 
-Configuration:
+The demo tags in [main.parameters.json](infra/main.parameters.json) are not a
+guarantee of governance-policy exemption; use them only where authorized.
 
-- [main.parameters.json](infra/main.parameters.json) supplies `CostControl=Ignore`
-  and `SecurityControl=Ignore` demo tags. Taggable resources receive these plus
-  `azd-env-name`. Use these values only where authorized; tags alone do not
-  guarantee a governance-policy exemption.
-- [main.bicep](infra/main.bicep) coordinates resource-group-scoped
-  [modules](infra/modules/). The allowed regions are listed above; use a new
-  environment when changing regions after provisioning.
-- The source model defaults to version `2026-03-17`, SKU `GlobalStandard`,
-  and capacity `10` (10,000 tokens/minute). Use
-  `azd env set MODEL_CAPACITY <capacity>` before provisioning to adjust it.
-  Check model availability and quota in the target subscription.
-- **GlobalStandard does not guarantee inference residency in the chosen region.**
-- [config.yaml](agentgateway/config.yaml) defines strict incoming API-key
-  authentication and the Azure model route. Runtime variables are
-  `AGENTGATEWAY_API_KEY`, `AZURE_CLIENT_ID` (the gateway identity's client ID),
-  and `SOURCE_AZURE_OPENAI_RESOURCE_NAME` (the source account name, not a URL).
-  Provisioning wires these into Container Apps. Entra-enabled deployments also
-  load [entra.yaml](agentgateway/entra.yaml) for the identity-protected path.
+### 2. Configure both Entra registrations and the prompt credential
 
-## The two tutors
+```bash
+node scripts/configure-gateway-entra.mjs
+node scripts/configure-prompt-gateway-entra.mjs
+```
 
-| Agent | Implementation | Model selection | Deploy/update |
-| --- | --- | --- | --- |
-| `ai-tutor-prompt-agent` | Foundry-managed prompt | `agentgateway-gateway/gpt-5.4-nano` through the ModelGateway connection | `azd hooks run postprovision` |
-| `ai-tutor-hosted-agent` | Python + Microsoft Agent Framework | `gpt-5.4-nano` directly against agentgateway `/v1` | `azd deploy ai-tutor-hosted-agent` |
+[entra.bicep](infra/entra.bicep) uses a pinned Microsoft Graph extension to
+provision both applications/service principals, the gateway scope, token claims,
+and CLI preauthorization. Existing registrations retain their IDs, scopes, and
+API settings; the adoption helper assigns an immutable `uniqueName` once.
+Directory provisioning is separate from ordinary `azd provision`.
 
-Each tutor offers explanations, hints, worked examples, and practice questions.
-They are independent agents in `consumer-project`, without external tools or
-persistent cross-session memory. Deploying one does not replace the other.
+Graph Bicep does not manage passwords. The
+[credential helper](scripts/configure-prompt-gateway-entra.mjs) creates/reuses a
+one-year prompt-client secret in Key Vault. Disabled, expired, or mismatched
+credentials require explicit rotation rather than silent replacement.
+
+### 3. Provision and deploy
+
+```bash
+vault="$(azd env get-value AZURE_KEY_VAULT_NAME)"
+PROMPT_GATEWAY_CLIENT_SECRET="$(az keyvault secret show --vault-name "$vault" \
+  --name agentgateway-prompt-client-secret --query value -o tsv)" azd up
+```
+
+Supply the credential through the command's process environment, not
+`azd env set`. Foundry keeps its own secure connection copy. Rotate the Entra
+credential before expiry and update both copies.
+
+The [main template](infra/main.bicep) requires both applications and the prompt
+credential. It provisions the source model, consumer projects, identity-only
+gateway, and OAuth2 connection. The source model defaults to capacity `10`
+(10,000 tokens/minute); set `MODEL_CAPACITY` before provisioning to adjust it.
+**GlobalStandard does not guarantee inference residency in the chosen region.**
+
+Native azd code deployment remotely builds the hosted agent without local
+Docker or a project-owned registry. Its postdeploy hook grants the hosted
+identity telemetry publishing and binds that identity as the gateway's delegated
+actor. Until the actor exists, delegated inference is denied.
+Project hooks deploy the prompt tutor idempotently.
+
+Configure and test the trusted OBO caller after the hosted Agent ID exists.
+There is no fallback to app-only tokens or shared keys.
+
+## Use and update the tutors
 
 ### Prompt tutor
 
-Edit [agent.json](agents/ai-tutor-prompt-agent/agent.json), then apply it:
+The prompt model is `agentgateway-gateway/gpt-5.4-nano`. Edit
+[agent.json](agents/ai-tutor-prompt-agent/agent.json), then run:
 
 ```bash
-azd hooks run postprovision
+azd hooks run postdeploy
 ```
 
-The definition uses the standard flat fields: `name`, `description`, `kind`,
-`model`, and `instructions`. Its model is
-`"agentgateway-gateway/gpt-5.4-nano"`. Changing this selects a model rather than
-provisioning one; the alias must already exist in agentgateway and be exposed
-by the Foundry connection.
+The [deployment helper](scripts/deploy-prompt-agent.mjs) preserves the
+connection-qualified model reference and verifies the persisted version.
+Unchanged definitions reuse the latest version.
 
-The [deployment hook](scripts/deploy-prompt-agent.mjs) authenticates through
-Azure CLI and uses `CONSUMER_FOUNDRY_PROJECT_ENDPOINT`. It preserves the model
-in the agent definition instead of replacing it with `CONSUMER_MODEL_REFERENCE`,
-maps the flat fields into the REST API's `definition` object, and calls the
-Foundry API with `api-version=v1`. It verifies persistence and fails explicitly
-on errors. Unchanged definitions reuse the latest version; changes create one.
-
-[azure.yaml](azure.yaml) runs this hook after provisioning and deployment.
-The repeated calls during `azd up` are idempotent and do not read the gateway key.
+The prompt connection uses OAuth2 client credentials, **not** the prompt Agent
+ID or invoking human. Direct managed-identity authentication was tested and
+rejected by Foundry's custom ModelGateway API, which accepts `ApiKey` or `OAuth2`;
+this sample uses only OAuth2.
 
 ### Hosted tutor
 
-[main.py](agents/ai-tutor-hosted-agent/main.py) combines Agent Framework's
-`OpenAIChatCompletionClient` with Foundry's `ResponsesHostServer`. Incoming
-Responses requests become Chat Completions calls to agentgateway, not requests
-to the prompt tutor.
-
-Update instructions or the model alias in
+[main.py](agents/ai-tutor-hosted-agent/main.py) adapts Foundry Responses requests
+to gateway Chat Completions using the unqualified alias `gpt-5.4-nano`.
+Responses-only `include` projections are logged and ignored instead of passed
+to Chat Completions. Edit its instructions in
 [agent.json](agents/ai-tutor-hosted-agent/agent.json), then run:
 
 ```bash
 azd deploy ai-tutor-hosted-agent
 ```
 
-The alias is `gpt-5.4-nano`, without a connection prefix. The runtime uses
-`/delegated/v1` for user delegation, `/entra/v1` for app-only Entra, or `/v1`
-for legacy API keys; direct gateway calls do not
-use Foundry's connection-qualified model syntax.
-Provisioning exports `FOUNDRY_PROJECT_ENDPOINT` for native azd deployment,
-alongside the `AZURE_AI_PROJECT_ENDPOINT` alias.
-
-The hosted identity becomes available after deployment. A service-level
-`postdeploy` hook retrieves it and applies
-[hosted-agent.bicep](infra/modules/hosted-agent.bicep), granting **Key Vault
-Secrets User** on the gateway secret and **Monitoring Metrics Publisher** on
-Application Insights. The runtime reads the secret lazily for model requests;
-neither the code package nor the hosted environment contains the key.
-Native azd handles packaging, remote builds, versions, and publication.
-
-### Hosted-agent Entra authentication
-
-To enable Entra authentication after initial provisioning, deploy the gateway
-API registration:
-
-```bash
-node scripts/configure-gateway-entra.mjs
-azd env set HOSTED_GATEWAY_AUTH_MODE entra_delegated
-```
-
-[entra.bicep](infra/entra.bicep) owns the application and service principal,
-API scope, claims, and CLI preauthorization using the pinned Microsoft Graph
-extension. The helper deploys this separate template and saves nonsecret outputs
-in azd. For existing registrations, it assigns the immutable `uniqueName` once
-and preserves their application, service principal, and scope IDs. Ordinary
-`azd provision` does not require permission to manage Entra applications.
-
-Reprovision using the existing-key command in [Permissions and secrets](#permissions-and-secrets),
-then run `azd deploy ai-tutor-hosted-agent`. The hosted tutor uses `/delegated/v1`;
-the prompt tutor keeps its API-key connection unless migrated as described below.
-The deployment hook authorizes the actual hosted identity at agentgateway and
-removes its gateway-secret read permission.
-The provisioning hook restarts the gateway to refresh its secret-mounted config.
-
-The gateway validates signature, tenant, audience, the allowed human (`oid`),
-the hosted Agent ID actor (`azp`), and `gateway.invoke`. App-only tokens cannot
-use this route. Source-model access still uses the gateway's managed identity.
-
-Your trusted application backend must perform the
-[Agent ID OBO exchange](https://learn.microsoft.com/en-us/entra/agent-id/agent-on-behalf-of-oauth-flow)
-and supply a **gateway-audience delegated token**, not the original user token.
-Configure the agent blueprint's user-facing API, delegated gateway permission,
-consent and permission inheritance; use a federated credential or certificate
-for the backend. Foundry does not perform OBO automatically, and this repository
-does not deploy a sign-in/OBO backend.
-
-Invoke the hosted Responses endpoint using
+Invoke through the trusted backend using
 [Foundry's delegated-token forwarding](https://learn.microsoft.com/en-us/azure/foundry/agents/how-to/use-on-behalf-of-flow):
 
 ```http
-Authorization: Bearer <backend Foundry access token>
+Authorization: Bearer <Foundry access token>
 x-client-agentgateway-access-token: <user-via-agent gateway access token>
 x-ms-user-identity: <authenticated human object ID>
+Content-Type: application/json
 
 {"input":"Explain fractions.","store":false,"background":false,"stream":false}
 ```
 
-The runtime keeps the forwarded token request-scoped, strips it before adapter
-metadata processing, and rejects stored
-or background requests. Streaming is supported. Missing/denied tokens never
-trigger app-only or API-key retries.
+The forwarded token must target the gateway API, not Foundry or Microsoft Graph.
+The runtime isolates it per request, strips the forwarding header before adapter
+metadata processing, and rejects stored/background requests. Streaming is
+supported. Missing or denied credentials never cause a different identity to be
+used. `DefaultAzureCredential` is used only for telemetry, not model inference.
+The OpenAI SDK parameter named `api_key` carries the delegated bearer token; it
+does not enable shared-key authentication.
 
-For an explicit autonomous fallback, set `HOSTED_GATEWAY_AUTH_MODE=entra`,
-reprovision and redeploy. That mode uses `DefaultAzureCredential` and `/entra/v1`;
-it does not represent a human. The default without a gateway Entra registration
-remains legacy API-key authentication.
-
-### Prompt-agent Entra authentication
-
-With gateway Entra authentication configured, migrate the ModelGateway connection:
-
-```bash
-node scripts/configure-gateway-entra.mjs --include-prompt
-node scripts/configure-prompt-gateway-entra.mjs
-vault="$(azd env get-value AZURE_KEY_VAULT_NAME)"
-AGENTGATEWAY_API_KEY="$(az keyvault secret show --vault-name "$vault" \
-  --name agentgateway-api-key --query value -o tsv)" \
-PROMPT_GATEWAY_CLIENT_SECRET="$(az keyvault secret show --vault-name "$vault" \
-  --name agentgateway-prompt-client-secret --query value -o tsv)" azd provision
-```
-
-Foundry uses OAuth2 client credentials to obtain a token for `/entra/v1`.
-agentgateway authorizes the dedicated application's service principal; this is
-**not the prompt agent's Agent ID or the invoking user's identity**. ModelGateway
-[documents OAuth2 client credentials](https://learn.microsoft.com/en-us/azure/foundry/agents/how-to/ai-gateway),
-not user-via-agent authentication, for model inference.
-The prompt definition and source-model authentication remain unchanged.
-
-Graph Bicep also creates the prompt application and service principal; it does
-not manage passwords. The credential script only creates/reuses a one-year
-client secret in Key Vault. Provisioning copies the process-supplied secret into
-Foundry's secure connection storage without rewriting its Key Vault metadata.
-Supply both secrets as above for subsequent provisioning. Rotate the Entra
-credential before expiry and update both stored copies; expired or mismatched
-credentials are rejected rather than silently replaced.
-Direct managed-identity authentication was tested and rejected by Foundry's
-`ModelGateway` API, which currently accepts only `ApiKey` or `OAuth2`.
-
-### Local hosted-agent development
-
-For local development, create the virtual environment and start the tutor from
-the project root:
+### Local development
 
 ```bash
 python3.13 -m venv agents/ai-tutor-hosted-agent/.venv
@@ -315,143 +248,107 @@ agents/ai-tutor-hosted-agent/.venv/bin/python -m pip install \
 azd ai agent run ai-tutor-hosted-agent --no-client
 ```
 
-The selected azd environment supplies provisioned endpoints and vault settings;
-local access uses your signed-in Azure identity. With Foundry Toolkit and Python
-Debugger installed, press **F5** in VS Code to launch the debugger and Agent
-Inspector. Ports 5679 and 8088 must be available.
+The selected environment supplies the delegated gateway endpoint. F5 in VS Code
+starts the debugger and Agent Inspector with ports 5679/8088. The server can
+start without a delegated token, but **every inference request must supply one**.
+A plain playground/Inspector/azd chat request without the forwarding header is
+rejected; use a caller capable of sending the required headers and stateless
+request body.
 
-## Permissions and secrets
+## Existing-environment migration
 
-The deploying human user receives explicit Azure RBAC assignments:
+This is a breaking change for API-key clients and hosted app-only callers.
+Before changing a running deployment, prepare the trusted OBO caller.
 
-| Role | Scope |
-| --- | --- |
-| Contributor | Sample resource group |
-| Key Vault Secrets Officer | Sample vault |
-| Foundry User / Azure AI User | Both Foundry accounts |
-| Log Analytics Reader | Application Insights and its workspace |
-| Privileged Monitoring Data Reader | Application Insights and its workspace |
+1. Reuse the existing gateway/prompt registrations with
+   `configure-gateway-entra.mjs`, and run the prompt credential helper. Existing
+   deployments do not need the fresh-install bootstrap.
+2. Reprovision with only `PROMPT_GATEWAY_CLIENT_SECRET` as shown above. This
+   replaces the gateway routes and prompt connection. The hosted app-only
+   version will no longer infer; schedule the transition accordingly.
+3. Deploy the hosted agent, then verify prompt OAuth and hosted delegated
+   inference using the trusted backend.
+4. Preview and apply removal of the obsolete key and its readers:
 
-The gateway identity has **Cognitive Services OpenAI User** on the source account
-and **Key Vault Secrets User** on the individual gateway secret. Both Foundry
-accounts disable local API-key authentication.
+   ```bash
+   node scripts/remove-legacy-gateway-key.mjs
+   node scripts/remove-legacy-gateway-key.mjs --apply
+   ```
 
-`AGENTGATEWAY_API_KEY` is an inference bearer credential, not an admin key.
-Bicep stores it as `agentgateway-api-key` in an RBAC-protected, purge-protected
-vault. Container Apps uses a versionless Key Vault reference with managed
-identity. In API-key mode, the ModelGateway connection holds a separate secure copy:
-**rotation must update both copies and refresh the running gateway credential.**
+The [cleanup helper](scripts/remove-legacy-gateway-key.mjs) refuses cleanup until
+the prompt connection uses OAuth2, the latest hosted version is active and
+delegated-only, active gateway revisions no longer reference the key, and the
+old `/v1/chat/completions` endpoint returns 404. It removes any remaining
+Container Apps secret named `agentgateway-api-key`, exact-secret-scoped
+**Key Vault Secrets User** assignments, and the Key Vault secret of that name.
+It does not delete the prompt-client secret, inherited permissions, the vault,
+or telemetry permissions. Key Vault deletion is soft deletion, never purge.
+Incomplete metadata or resources remaining after deletion cause an explicit failure.
 
-Reuse the existing key for infrastructure changes:
+Incremental Bicep alone does **not** remove previously created secrets or roles.
+The cleanup is explicit, not an automatic deployment hook.
+Remove obsolete `AGENTGATEWAY_AUTH_MODE`, `HOSTED_GATEWAY_AUTH_MODE`,
+`AGENTGATEWAY_TOKEN_SCOPE`, and any old API-key values from local azd/shell/CI
+configuration. They no longer select supported modes.
 
-```bash
-vault="$(azd env get-value AZURE_KEY_VAULT_NAME)"
-AGENTGATEWAY_API_KEY="$(az keyvault secret show --vault-name "$vault" \
-  --name agentgateway-api-key --query value -o tsv)" azd provision
-```
+## Permissions and shared monitoring
 
-Do not commit secrets or share `.azure/`. Avoid `azd env set` for the key because
-it persists a local copy; the examples supply it only to the command's process.
-Only inference port 4000 is exposed through HTTPS ingress; admin, metrics,
-readiness, and collector endpoints are not public.
+The deploying human receives resource-group Contributor, vault Secrets Officer,
+Foundry User on both accounts, and Log Analytics Reader/Privileged Monitoring
+Data Reader on Application Insights and its workspace.
 
-## Shared monitoring
+The gateway identity receives **Cognitive Services OpenAI User** on the source
+account and **Monitoring Metrics Publisher** on Application Insights. Neither
+it nor the hosted agent receives Key Vault secret-read access.
+The vault is retained only to manage the prompt OAuth credential.
 
-[monitoring.bicep](infra/modules/monitoring.bicep) provisions a shared
-workspace-backed Application Insights component and Log Analytics workspace.
-Local-auth ingestion is disabled.
+[monitoring.bicep](infra/modules/monitoring.bicep) provisions shared
+workspace-backed Application Insights and Log Analytics with local-auth
+ingestion disabled. Both projects connect through **ProjectManagedIdentity**;
+their identities receive **Monitoring Metrics Publisher** for ingestion and
+**Monitoring Reader** for Foundry Insights, scoped to the component.
+The connection uses API `2026-09-01`; published Bicep schemas lag some supported
+service properties.
 
-Both Foundry projects connect with **Project Managed Identity**; each project's
-system-assigned identity receives **Monitoring Metrics Publisher** for ingestion
-and **Monitoring Reader** for Foundry Insights, scoped to that component only.
-The connections are created after their role assignments.
-Project-managed trace ingestion is a Foundry preview. The connection uses API
-`2026-09-01`; its `ProjectManagedIdentity` authentication is ahead of the published
-Bicep types, so the modules narrowly suppress the missing-schema warning.
+agentgateway sends spans to a loopback-only collector sidecar, which authenticates
+using the gateway identity. The hosted tutor exports telemetry using its own
+identity with sensitive-message capture disabled. Resource diagnostics from
+Foundry, Key Vault, and Container Apps target the shared workspace.
 
-agentgateway sends OpenTelemetry spans to a loopback-only collector sidecar.
-The collector authenticates with the gateway identity and **Monitoring Metrics
-Publisher**, allowing Entra-only ingestion. The Application Insights connection
-string identifies the destination; it is not an authentication credential.
-Gateway traces omit prompt/response content in the tested configuration.
+Inspect Application Insights logs, Foundry agent traces, and workspace resource
+logs. End-to-end Azure ingestion/correlation and credential rotation still need
+validation. Monitoring reader permissions can expose sensitive GenAI data.
 
-The hosted tutor exports Agent Framework/OpenTelemetry traces to the same
-component using its own identity, with message-content capture disabled.
-The prompt tutor uses the consumer project's managed tracing connection.
-
-Supported diagnostics from Foundry accounts/projects, Key Vault, Container Apps,
-and its environment target the shared workspace. Resource diagnostics are
-separate from Application Insights traces; vault audit logs cover secret access.
-The deployer's monitoring roles can expose sensitive GenAI data.
-
-azd outputs include `APPLICATIONINSIGHTS_NAME`,
-`APPLICATIONINSIGHTS_RESOURCE_ID`, `APPLICATIONINSIGHTS_CONNECTION_STRING`, and
-`AZURE_LOG_ANALYTICS_WORKSPACE_ID`. Inspect **Application Insights > Logs** for
-traces, **Foundry > Agents > Traces** for agent traces, and the shared workspace
-for resource logs. Azure ingestion and
-cross-component correlation remain unverified; ingestion can incur charges.
-
-## Validate and operate
-
-Local checks do not provision Azure resources or call external models.
-Infrastructure tests require Azure CLI/Bicep. Gateway tests run the pinned
-Linux amd64 image with mock identity, model, and OTLP endpoints; they require
-Podman on Linux with host networking. Set `CONTAINER_RUNTIME=docker` for Docker
-on Linux.
+## Validate and clean up
 
 ```bash
-# Compile Bicep and run local contract/runtime tests.
-node --test tests/infra.test.mjs tests/agent.test.mjs \
-  tests/deployment.test.mjs tests/entra.test.mjs tests/gateway.test.mjs
+node --test tests/infra.test.mjs tests/agent.test.mjs tests/deployment.test.mjs \
+  tests/entra.test.mjs tests/migration.test.mjs tests/gateway.test.mjs
 agents/ai-tutor-hosted-agent/.venv/bin/python -m unittest discover \
   -s agents/ai-tutor-hosted-agent -p 'test_*.py'
-
-# Preview infrastructure changes; supply the existing key as shown above.
-azd provision --preview
-
-# Remove the sample when finished.
-azd down
 ```
 
-After deployment, inspect the consumer project's connection under **Manage >
-Resource details > Admin-connected models** and test each tutor independently.
-Verify real identity issuance/refresh, RBAC, rotation, and telemetry ingestion.
-Inference, hosted-agent compute, and monitoring incur usage charges.
+Local tests do not provision Azure or invoke real models. Infrastructure tests
+require Azure CLI/Bicep. Gateway tests run the pinned Linux amd64 image against
+mock identity/model/OTLP services using Podman with host networking; Docker on
+Linux can be selected with `CONTAINER_RUNTIME=docker`.
 
-This is a public-network demonstration, not a production landing zone:
+This is a public-network integration demonstration, not a production landing
+zone. The gateway is pinned to `v1.6.0` by digest and runs one always-on replica
+(1 vCPU/2 GiB); the collector is `0.162.0` (0.25 vCPU/0.5 GiB). There is no high
+availability or persistent spend database. Dependencies include preview
+components. Inference, hosting, and monitoring incur charges.
 
-- agentgateway is pinned to `v1.6.0` by Linux amd64 digest. It runs one always-on
-  replica with 1 vCPU and 2 GiB, without high availability or a persistent spend
-  database.
-- The OpenTelemetry collector is pinned to `0.162.0` and adds 0.25 vCPU/0.5 GiB.
-- The optional Entra API registration is outside the resource group. Delete it
-  separately with `az ad app delete --id <AGENTGATEWAY_ENTRA_CLIENT_ID>` when
-  removing an Entra-enabled deployment. If prompt OAuth is enabled, also delete
-  its dedicated application with `az ad app delete --id <PROMPT_GATEWAY_CLIENT_ID>`.
-- Log Analytics retention is 30 days. Avoid sensitive prompt logging.
-- Hosted-agent dependencies include preview components; response storage is
-  in-process, not durable background-job or cross-session storage.
-- RBAC propagation can delay initial requests. Regional model quota does not
-  guarantee Container Apps capacity.
-- Versionless Key Vault references are refreshed asynchronously; configuration
-  or credential changes may require restarting the active revision.
-- Vault purge protection and Foundry soft deletion can reserve names after
-  cleanup. Use a fresh environment for clean retries; do not purge automatically.
+Use `azd down` to remove Azure resources. Entra applications live outside the
+resource group; delete the dedicated applications separately when no longer
+needed. Vault purge protection and Foundry soft deletion can reserve names;
+do not purge automatically. Log retention is 30 days.
 
-## Current azd Foundry extension limitation
+## Current azd prompt deployment limitation
 
-Foundry gateway-connected prompt agents require the model format
-**`<connection-name>/<model-name>`**, here
-`agentgateway-gateway/gpt-5.4-nano`.
-
-Native prompt deployment has encountered azd extension validation that rejects
-the `/` separator. This sample therefore deploys the prompt tutor through
-lifecycle hooks and the Foundry API, preserving the required model reference.
-The current extension's validation behavior has not been re-tested here.
-
-This workaround concerns native prompt-service validation, not agentgateway's
-inference API. The hosted tutor still uses native azd deployment because its
-Python runtime selects the unqualified gateway alias.
-
-See [Foundry gateway-connected models](https://learn.microsoft.com/azure/foundry/agents/how-to/ai-gateway#create-a-prompt-agent-with-the-model-connection)
-and [azd lifecycle hooks](https://learn.microsoft.com/azure/developer/azure-developer-cli/azd-extensibility).
+Foundry gateway-connected prompt agents require
+`<connection-name>/<model-name>`. Native prompt deployment encountered extension
+validation rejecting `/`, so this sample uses lifecycle hooks and the Foundry
+API while preserving that model reference. Hosted deployment remains native
+azd code deployment. The extension's current validation behavior has not been
+re-tested here.

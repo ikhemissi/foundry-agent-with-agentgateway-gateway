@@ -5,16 +5,13 @@ param consumerProjectName string
 param gatewayEndpoint string
 param modelDeploymentName string
 
-@secure()
-param gatewayApiKey string
-
-param gatewayEntraClientId string = ''
-param promptGatewayClientId string = ''
+param gatewayEntraClientId string
+param promptGatewayClientId string
 
 @secure()
-param promptGatewayClientSecret string = ''
+@minLength(1)
+param promptGatewayClientSecret string
 
-var useOAuth = !empty(promptGatewayClientId)
 var modelMetadata = {
   deploymentInPath: 'false'
   inferenceAPIVersion: ''
@@ -41,29 +38,8 @@ resource project 'Microsoft.CognitiveServices/accounts/projects@2025-06-01' exis
   name: consumerProjectName
 }
 
-resource connectionKey 'Microsoft.CognitiveServices/accounts/projects/connections@2025-04-01-preview' = if (!useOAuth) {
-  parent: project
-  name: 'agentgateway-gateway'
-  properties: {
-    category: 'ModelGateway'
-    target: '${gatewayEndpoint}/v1'
-    authType: 'ApiKey'
-    isSharedToAll: false
-    metadata: union(modelMetadata, {
-      authConfig: string({
-        type: 'api_key'
-        name: 'Authorization'
-        format: 'Bearer {api_key}'
-      })
-    })
-    credentials: {
-      key: gatewayApiKey
-    }
-  }
-}
-
 #disable-next-line BCP081
-resource connectionOAuth 'Microsoft.CognitiveServices/accounts/projects/connections@2026-09-01' = if (useOAuth) {
+resource connectionOAuth 'Microsoft.CognitiveServices/accounts/projects/connections@2026-09-01' = {
   parent: project
   name: 'agentgateway-gateway'
   properties: {

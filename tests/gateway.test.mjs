@@ -18,6 +18,8 @@ const sensitiveMessage = 'PRIVATE-COMPATIBILITY-MESSAGE-DO-NOT-CAPTURE';
 const tenantId = '22222222-2222-2222-2222-222222222222';
 const audience = '33333333-3333-3333-3333-333333333333';
 const allowedPrincipal = '44444444-4444-4444-4444-444444444444';
+const promptPrincipal = '55555555-5555-5555-5555-555555555555';
+const promptClient = '66666666-6666-6666-6666-666666666666';
 
 async function listen(server) {
   server.listen(0, '127.0.0.1');
@@ -131,7 +133,6 @@ test('pinned gateway: Azure identity, authentication, inference, streaming and t
     ['http://127.0.0.1:4318', `http://127.0.0.1:${mockPort}`],
     ['port: 4000', `port: ${ports.gateway}`],
     ['bindAddress: 0.0.0.0', 'bindAddress: 127.0.0.1'],
-    ['azureResourceType: openAI', `azureResourceType: openAI\n        baseUrl: http://127.0.0.1:${mockPort}`],
   ]) {
     assert.ok(config.includes(original), `Expected configuration setting: ${original}`);
     config = config.replace(original, replacement);
@@ -141,10 +142,11 @@ test('pinned gateway: Azure identity, authentication, inference, streaming and t
   const child = spawn(runtime, [
     'run', '--rm', '--network', 'host', '--name', name,
     '-v', `${directory}/config.yaml:/config.yaml:ro`,
-    '-e', `AGENTGATEWAY_API_KEY=${apiKey}`,
     '-e', `AZURE_TENANT_ID=${tenantId}`,
     '-e', `AGENTGATEWAY_ENTRA_CLIENT_ID=${audience}`,
-    '-e', `AGENTGATEWAY_ALLOWED_PRINCIPAL_IDS=${JSON.stringify([allowedPrincipal])}`,
+    '-e', `AGENTGATEWAY_AUTHORIZED_USER_ID=${allowedPrincipal}`,
+    '-e', `PROMPT_GATEWAY_PRINCIPAL_ID=${promptPrincipal}`,
+    '-e', `PROMPT_GATEWAY_CLIENT_ID=${promptClient}`,
     '-e', 'AGENTGATEWAY_DELEGATED_AGENT_CLIENT_ID=test-agent',
     '-e', 'SOURCE_AZURE_OPENAI_RESOURCE_NAME=local-source',
     '-e', 'AZURE_CLIENT_ID=11111111-1111-1111-1111-111111111111',
@@ -187,7 +189,7 @@ test('pinned gateway: Azure identity, authentication, inference, streaming and t
     await delay(100);
   }
   assert.ok(started, `Gateway did not become ready:\n${output}`);
-  const completion = (authorization, overrides = {}, path = '/v1/chat/completions') => fetch(`${base}${path}`, {
+  const completion = (authorization, overrides = {}, path = '/delegated/v1/chat/completions') => fetch(`${base}${path}`, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
@@ -200,7 +202,7 @@ test('pinned gateway: Azure identity, authentication, inference, streaming and t
     signal: AbortSignal.timeout(10000),
   });
 
-  await t.test('missing and invalid keys never reach the model', async () => {
+  await t.test('missing and invalid tokens never reach the model', async () => {
     for (const key of [undefined, 'Bearer wrong-key']) {
       const response = await completion(key);
       assert.equal(response.status, 401);
@@ -208,8 +210,8 @@ test('pinned gateway: Azure identity, authentication, inference, streaming and t
     }
     assert.equal(upstreamRequests.length, 0);
   });
-  await t.test('valid bearer key uses the Container Apps identity endpoint', async () => {
-    const response = await completion(`Bearer ${apiKey}`);
+  await t.test('delegated token uses the Container Apps identity endpoint', async () => {
+    const response = await completion(`Bearer ${jwt()}`);
     assert.equal(response.status, 200, await response.clone().text());
     assert.equal((await response.json()).choices[0].message.content, 'Hello tutor');
     assert.equal(identityRequests.length, 1);
@@ -221,7 +223,7 @@ test('pinned gateway: Azure identity, authentication, inference, streaming and t
     assert.equal(upstreamRequests[0].data.model, 'gpt-5.4-nano');
   });
   await t.test('streaming returns OpenAI SSE chunks and DONE', async () => {
-    const response = await completion(`Bearer ${apiKey}`, { stream: true });
+    const response = await completion(`Bearer ${jwt()}`, { stream: true });
     assert.equal(response.status, 200);
     assert.match(response.headers.get('content-type'), /text\/event-stream/);
     const reader = response.body.getReader();
@@ -240,22 +242,24 @@ test('pinned gateway: Azure identity, authentication, inference, streaming and t
     assert.equal(chunks.map((chunk) => chunk.choices[0].delta.content || '').join(''), 'Hello tutor');
     assert.equal(identityRequests.length, 1, 'The unexpired identity token should be cached');
   });
-  await t.test('unknown models are rejected without calling the upstream', async () => {
+  await t.test('removed shared-key endpoint never reaches the upstream with any credential', async () => {
     const count = upstreamRequests.length;
-    const response = await completion(`Bearer ${apiKey}`, { model: 'unknown-model' });
-    assert.equal(response.status, 404, await response.text());
+    for (const credential of [undefined, apiKey, jwt()]) {
+      const response = await completion(credential ? `Bearer ${credential}` : undefined, {}, '/v1/chat/completions');
+      assert.equal(response.status, 404, await response.text());
+    }
     assert.equal(upstreamRequests.length, count);
   });
   await t.test('upstream failures are not converted into successes', async () => {
-    const response = await completion(`Bearer ${apiKey}`, { messages: [{ role: 'user', content: 'upstream-error' }] });
+    const response = await completion(`Bearer ${jwt()}`, { messages: [{ role: 'user', content: 'upstream-error' }] });
     assert.equal(response.status, 429, await response.text());
   });
   await t.test('management endpoints are absent from inference ingress', async () => {
     const count = upstreamRequests.length;
     for (const path of ['/config_dump', '/ui/', '/metrics', '/healthz/ready']) {
-      const response = await fetch(`${base}${path}`, { headers: { authorization: `Bearer ${apiKey}` } });
-      assert.equal(response.status, 400, path);
-      assert.equal((await response.json()).error.code, 'invalid_request_body', path);
+      const response = await fetch(`${base}${path}`, { headers: { authorization: `Bearer ${jwt()}` } });
+      assert.equal(response.status, 404, path);
+      await response.text();
     }
     assert.equal(upstreamRequests.length, count);
     const response = await fetch(`http://127.0.0.1:${ports.stats}/metrics`);
@@ -282,6 +286,8 @@ test('pinned gateway: Azure identity, authentication, inference, streaming and t
       ['wrong signature', jwt({}, otherKey), 401],
       ['wrong issuer', jwt({ iss: 'https://other-issuer.example' }), 401],
       ['wrong audience', jwt({ aud: 'other-api' }), 401],
+      ['wrong tenant', jwt({ tid: 'other-tenant' }), 403],
+      ['not yet valid', jwt({ nbf: Math.floor(Date.now() / 1000) + 3600 }), 401],
       ['expired', jwt({ exp: Math.floor(Date.now() / 1000) - 3600 }), 401],
       ['unknown identity', jwt({ oid: 'other-user' }), 403],
       ['missing delegated scope', jwt({ scp: 'other.scope' }), 403],
@@ -292,8 +298,16 @@ test('pinned gateway: Azure identity, authentication, inference, streaming and t
     }
     assert.equal(upstreamRequests.length, count);
   });
-  await t.test('delegated users and autonomous agents use gateway identity upstream', async () => {
-    for (const claims of [{}, { idtyp: 'app', scp: undefined }]) {
+  await t.test('only the dedicated prompt application can use the client-credentials route', async () => {
+    const count = upstreamRequests.length;
+    for (const claims of [{}, { idtyp: 'app', scp: undefined }, {
+      oid: promptPrincipal, idtyp: 'app', scp: undefined, azp: 'other-app',
+    }, { oid: promptPrincipal, azp: promptClient, idtyp: 'app' }]) {
+      const response = await completion(`Bearer ${jwt(claims)}`, {}, '/entra/v1/chat/completions');
+      assert.equal(response.status, 403, await response.text());
+    }
+    assert.equal(upstreamRequests.length, count);
+    for (const claims of [{ oid: promptPrincipal, azp: promptClient, idtyp: 'app', scp: undefined }]) {
       const callerToken = jwt(claims);
       const response = await completion(`Bearer ${callerToken}`, {}, '/entra/v1/chat/completions');
       assert.equal(response.status, 200, await response.clone().text());
@@ -306,7 +320,7 @@ test('pinned gateway: Azure identity, authentication, inference, streaming and t
     }
   });
   await t.test('Entra route preserves streaming and upstream errors', async () => {
-    const authorization = `Bearer ${jwt({ idtyp: 'app', scp: undefined })}`;
+    const authorization = `Bearer ${jwt({ oid: promptPrincipal, azp: promptClient, idtyp: 'app', scp: undefined })}`;
     const streamed = await completion(authorization, { stream: true }, '/entra/v1/chat/completions');
     assert.equal(streamed.status, 200, await streamed.clone().text());
     assert.match(streamed.headers.get('content-type'), /text\/event-stream/);
@@ -324,6 +338,9 @@ test('pinned gateway: Azure identity, authentication, inference, streaming and t
     for (const [name, credential, status] of [
       ['missing token', undefined, 401],
       ['app-only token', jwt({ idtyp: 'app', scp: undefined }), 403],
+      ['app token with a scope', jwt({ idtyp: 'app' }), 403],
+      ['prompt token', jwt({ oid: promptPrincipal, azp: promptClient, idtyp: 'app', scp: undefined }), 403],
+      ['shared key', apiKey, 401],
       ['disallowed user', jwt({ oid: 'other-user' }), 403],
       ['disallowed actor', jwt({ azp: 'other-agent' }), 403],
       ['missing actor', jwt({ azp: undefined }), 403],
