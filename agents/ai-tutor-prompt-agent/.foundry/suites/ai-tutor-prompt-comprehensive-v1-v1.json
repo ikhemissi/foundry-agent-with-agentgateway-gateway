@@ -1,0 +1,48 @@
+{
+  "name": "ai-tutor-prompt-comprehensive-v1",
+  "version": "1",
+  "display_name": "ai-tutor-prompt-comprehensive-v1",
+  "description": "Auto-generated evaluation suite for ai-tutor-prompt-comprehensive-v1",
+  "subtype": "default",
+  "dataset": {
+    "name": "ai-tutor-prompt-comprehensive-v1-data",
+    "version": "1.0"
+  },
+  "testing_criteria": [
+    {
+      "type": "azure_ai_evaluator",
+      "id": "",
+      "name": "ai-tutor-prompt-comprehensive-v1-evaluator",
+      "evaluator_name": "ai-tutor-prompt-comprehensive-v1-evaluator",
+      "evaluator_version": "",
+      "initialization_parameters": {
+        "deployment_name": "gpt-6.1-sol"
+      },
+      "data_mapping": {
+        "query": "{{item.query}}",
+        "response": "{{sample.output_items}}"
+      }
+    }
+  ],
+  "target": {
+    "type": "azure_ai_agent",
+    "name": "ai-tutor-prompt-agent",
+    "version": null,
+    "tool_descriptions": []
+  },
+  "input_messages": {
+    "type": "template",
+    "template": [
+      {
+        "role": "user",
+        "content": "{{item.query}}"
+      }
+    ]
+  },
+  "system_data": {
+    "createdAt": "10/18/2026 18:23:46 +00:00",
+    "createdBy": "Iheb KHEMISSI",
+    "modifiedAt": "10/18/2026 19:05:49 +00:00",
+    "modifiedBy": ""
+  }
+}

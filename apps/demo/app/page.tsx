@@ -5,7 +5,7 @@ import { PublicClientApplication } from "@azure/msal-browser";
 import { MsalProvider } from "@azure/msal-react";
 import { DemoChat } from "./providers";
 
-let initialization: Promise<{ app: PublicClientApplication; scope: string }> | undefined;
+let initialization: Promise<{ app: PublicClientApplication; scope: string; localEvaluations: boolean }> | undefined;
 
 async function initialize() {
   const response = await fetch("/api/config", { cache: "no-store" });
@@ -21,20 +21,22 @@ async function initialize() {
     cache: { cacheLocation: "memoryStorage" },
   });
   await app.initialize();
-  return { app, scope: config.scope };
+  return { app, scope: config.scope, localEvaluations: config.localEvaluations === true };
 }
 
 export default function Page() {
   const [instance, setInstance] = useState<PublicClientApplication>();
   const [scope, setScope] = useState("");
+  const [localEvaluations, setLocalEvaluations] = useState(false);
   const [error, setError] = useState("");
   useEffect(() => {
     let disposed = false;
     initialization ??= initialize();
-    initialization.then(({ app, scope }) => {
+    initialization.then(({ app, scope, localEvaluations }) => {
       if (!disposed) {
         setScope(scope);
         setInstance(app);
+        setLocalEvaluations(localEvaluations);
       }
     }).catch((cause: unknown) => {
       if (!disposed) setError(cause instanceof Error ? cause.message : "Could not initialize sign-in.");
@@ -45,7 +47,7 @@ export default function Page() {
     <header><p className="eyebrow">IDENTITY-FIRST INFERENCE</p><h1>Foundry + agentgateway</h1>
       <p>Two independent tutors. One gateway. Different authorization boundaries.</p></header>
     {error ? <section role="alert">{error}</section>
-      : instance ? <MsalProvider instance={instance}><DemoChat scope={scope} /></MsalProvider>
+      : instance ? <MsalProvider instance={instance}><DemoChat scope={scope} localEvaluations={localEvaluations} /></MsalProvider>
         : <p role="status">Preparing Microsoft sign-in...</p>}
   </main>;
 }

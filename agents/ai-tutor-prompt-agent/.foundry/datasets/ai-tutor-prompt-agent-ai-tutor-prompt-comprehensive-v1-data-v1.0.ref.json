@@ -1,0 +1,30 @@
+{
+  "id": "azureai://accounts/foundry-consumer-hfliow46qweae/projects/consumer-project/data/ai-tutor-prompt-comprehensive-v1-data/versions/1.0",
+  "name": "ai-tutor-prompt-comprehensive-v1-data",
+  "version": "1.0",
+  "displayName": "ai-tutor-prompt-comprehensive-v1-data",
+  "description": "Dataset for eval data generation job: datagen-19dfc2c2bf7347588db3eff806bd168c",
+  "tags": {
+    "data_generation_job_id": "datagen-19dfc2c2bf7347588db3eff806bd168c",
+    "data_generation_type": "simple_qna",
+    "scenario": "evaluation"
+  },
+  "type": "uri_file",
+  "lifecycle": null,
+  "source": "Data",
+  "isReference": false,
+  "dataUri": "https://saokescnwknaskk.blob.core.windows.net/foundry-co-54c08b32-7757-523f-892c-40fedbcaea30",
+  "isSingleFile": true,
+  "connectionName": null,
+  "systemData": {
+    "createdAt": "2026-10-18T19:04:12.7733195+00:00",
+    "createdBy": "779301c0-18b2-4cdc-801b-a0a3368fee0a",
+    "createdByType": null,
+    "lastModifiedAt": "2026-10-18T19:04:12.7733195+00:00"
+  },
+  "contentDownloaded": true,
+  "contentPath": ".foundry/datasets/ai-tutor-prompt-comprehensive-v1-data-v1.0",
+  "contentFiles": [
+    "ai-tutor-prompt-comprehensive-v1-data_dg.jsonl"
+  ]
+}

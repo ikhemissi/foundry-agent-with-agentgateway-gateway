@@ -1,0 +1,112 @@
+defaultEnvironment: agentgateway-uksouth-demo
+environments:
+  agentgateway-uksouth-demo:
+    azd:
+      environmentName: agentgateway-uksouth-demo
+      service: ai-tutor-hosted-agent
+    lastEval:
+      executionMode: local-curated-with-azure-judge
+      nativeFoundryRun: false
+      localRunId: f2431e13-8bb5-47fd-b244-811076bd493d
+      suiteId: curated-reference-v1
+      tier: smoke
+      completedAt: "2026-10-18T20:54:57.080Z"
+      resultFile: .foundry/results/smoke-f2431e13-8bb5-47fd-b244-811076bd493d.jsonl
+      summaryFile: .foundry/results/smoke-f2431e13-8bb5-47fd-b244-811076bd493d.jsonl.summary.json
+      resultScope: Combined run; filter rows by tutor=hosted and summary byTutor.hosted.
+      datasetHash: 42b6b07f95c9ef463ffe1a8a265891660e1b51fabd2836e7641e41a7b2a8ad07
+      judgeDeployment: gpt-6.1-sol
+      agentEndpointSelector: "@latest"
+      agentVersionPinned: false
+      status: scored
+      qualityGate: failed
+      gateCalibration: provisional
+      expectedCases: 16
+      scored: 16
+      passed: 15
+      passRate: 0.9375
+      errors: 0
+      safetyFailures: 0
+      failedCases:
+        - caseId: language-01
+          category: multilingual
+          dimension: correctness
+          score: 2
+          review: Incorrect place-value expansion omits the 2 whole units in 2.75; finite decimal terminology also needs care.
+    evaluationSuites:
+      - id: comprehensive-generated
+        generationJobId: suitegen-ai-tutor-hosted-comprehensive-v1-v1-218ca957
+        generationSource: synthetic
+        status: review-required
+        cacheStatus: complete
+        remoteEvidence:
+          checkedAt: "2026-10-18T19:42:45Z"
+          generationStatus: succeeded
+          generationFinishedAt: "2026-10-18T19:30:16Z"
+          suiteLookup: found
+          suiteApiVersion: 2025-11-15-preview
+          suiteVersion: "1"
+          suiteStatusFieldPresent: false
+          suiteSubtype: default
+          suiteModifiedAt: "2026-10-18T19:30:17Z"
+          targetVersion: null
+          targetVersionPinned: false
+          targetResolution: latest
+          evaluatorVersionInSuite: ""
+          evaluatorVersionPinnedInSuite: false
+          evaluatorVersionCached: "1"
+          note: Generation success and suite existence do not establish review approval or evaluation readiness.
+        initializationReview:
+          status: documented-compatible-not-runtime-validated
+          evaluatorType: custom
+          definitionType: rubric
+          catalogRequiredParameter: model
+          catalogParameterMeaning: Model deployment name for the LLM judge
+          serviceTestingCriterion:
+            initialization_parameters:
+              deployment_name: gpt-6.1-sol
+          conclusion: Official generated-rubric SDK samples use deployment_name at the service testing-criterion boundary; the catalog model field alone does not establish incompatibility.
+          mapping: Caller deploymentName maps to testing_criteria[].initialization_parameters.deployment_name; it is not a top-level suite property.
+          runtimeAliasValidation: No evaluation was executed; the selected service runtime's internal model alias normalization was not observed.
+          sources:
+            - https://github.com/Azure/azure-sdk-for-python/blob/c00962557a45a95b75f28adfd6b7497713c6fe4e/sdk/ai/azure-ai-projects/samples/evaluations/sample_rubric_evaluator_generation_basic.py
+            - https://github.com/Azure/azure-sdk-for-python/blob/c00962557a45a95b75f28adfd6b7497713c6fe4e/sdk/ai/azure-ai-projects/samples/evaluations/sample_rubric_evaluator_manual.py
+            - https://github.com/Azure/azure-rest-api-specs/blob/ae348cc71f54a61f5d17472052cfef279a23db6b/specification/ai-foundry/data-plane/Foundry/src/openai/evaluations/models.tsp
+        suiteName: ai-tutor-hosted-comprehensive-v1
+        suiteVersion: "1"
+        suiteFile: .foundry/suites/ai-tutor-hosted-comprehensive-v1-v1.json
+        dataset: ai-tutor-hosted-comprehensive-v1-data
+        datasetVersion: "1.0"
+        datasetFile: .foundry/datasets/ai-tutor-hosted-agent-ai-tutor-hosted-comprehensive-v1-data-v1.0.ref.json
+        datasetUri: azureai://accounts/foundry-consumer-hfliow46qweae/projects/consumer-project/data/ai-tutor-hosted-comprehensive-v1-data/versions/1.0
+        evaluators:
+          - name: ai-tutor-hosted-comprehensive-v1-evaluator
+            version: "1"
+            threshold: 0.5
+            definitionFile: .foundry/evaluators/ai-tutor-hosted-comprehensive-v1-evaluator-v1.json
+        cacheValidation:
+          rows: 150
+          expectedBehaviorRows: 0
+          referenceRows: 0
+          messagesRows: 0
+          turnFormat: single-user-query-template
+          issues:
+            - Rows contain id, description, query and candidate_response, without explicit expected_behavior or reference facts.
+            - Suite maps query and response only; no structured multi-turn messages are supplied.
+            - Agent target version is null and evaluator version is empty; remote suite execution would resolve latest rather than the cached evaluator version.
+            - Judge deployment_name follows official rubric service samples; catalog model naming is not evidence of a proven incompatibility, but runtime was not exercised.
+        tags:
+          tier: coverage
+          purpose: quality
+          stage: generated
+      - id: curated-reference-v1
+        status: local-draft
+        generationSource: curated-reference
+        suiteFile: .foundry/suites/curated-v1.json
+        datasetFile: .foundry/datasets/ai-tutor-hosted-agent-curated-v1.jsonl
+        evaluators:
+          - definitionFile: .foundry/evaluators/tutor-rubric-v1.json
+        tags:
+          tier: coverage
+          purpose: quality
+          stage: curated

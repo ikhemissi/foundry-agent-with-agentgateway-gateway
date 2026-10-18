@@ -43,7 +43,7 @@ test("rejects missing, combined, whitespace, and forged bearer tokens", async ()
   }
 });
 test("exports only public auth config and constrains server endpoints", () => {
-  assert.deepEqual(Object.keys(publicConfig(config)).sort(), ["clientId", "origin", "scope", "tenantId"]);
+  assert.deepEqual(Object.keys(publicConfig(config)).sort(), ["clientId", "localEvaluations", "origin", "scope", "tenantId"]);
   for (const endpoint of ["http://consumer.services.ai.azure.com/api/projects/a",
     "https://evil.example/api/projects/a", `${environment.CONSUMER_FOUNDRY_PROJECT_ENDPOINT}?next=evil`]) {
     assert.throws(() => getConfig({ ...environment, CONSUMER_FOUNDRY_PROJECT_ENDPOINT: endpoint }));
@@ -141,7 +141,8 @@ test("credential modes are explicit and managed identity never accepts local key
   assert.throws(() => getConfig({ ...environment, DEMO_AUTH_MODE: "managed-identity",
     DEMO_CERTIFICATE_PATH: undefined, DEMO_PRIVATE_KEY_PATH: undefined }), /MANAGED_IDENTITY/);
   assert.equal("DEMO_CERTIFICATE_PATH" in managed, false);
-  assert.deepEqual(Object.keys(publicConfig(managed)).sort(), ["clientId", "origin", "scope", "tenantId"]);
+  assert.deepEqual(Object.keys(publicConfig(managed)).sort(), ["clientId", "localEvaluations", "origin", "scope", "tenantId"]);
+  assert.equal(publicConfig(managed).localEvaluations, false);
 });
 test("managed identity acquires only the token-exchange audience and retains user-via-agent OBO", async () => {
   const signal = new AbortController().signal;

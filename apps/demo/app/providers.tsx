@@ -4,8 +4,9 @@ import { AuthError, InteractionRequiredAuthError, InteractionStatus } from "@azu
 import { useMsal } from "@azure/msal-react";
 import { CopilotChat, CopilotKitProvider } from "@copilotkit/react-core/v2";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { LocalEvaluations } from "./evaluations";
 
-export function DemoChat({ scope }: { scope: string }) {
+export function DemoChat({ scope, localEvaluations = false }: { scope: string; localEvaluations?: boolean }) {
   const { instance, accounts, inProgress } = useMsal();
   const account = accounts[0];
   const [token, setToken] = useState("");
@@ -119,6 +120,7 @@ export function DemoChat({ scope }: { scope: string }) {
         {result.check}: passed ({result.durationMs} ms) <small>Request: {result.requestId}</small>
       </li>)}</ul>}
     </section>
+    {localEvaluations && <LocalEvaluations token={token} accountId={account.homeAccountId} />}
     {error && <section role="alert">{error} <button onClick={signIn}>Renew sign-in</button></section>}
     {token ? <section className="chat" aria-label="Tutor chat">
       <CopilotKitProvider key={`${account.homeAccountId}:${tutor}:${session}`}

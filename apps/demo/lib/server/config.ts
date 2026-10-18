@@ -67,5 +67,11 @@ export function publicConfig(config: DemoConfig) {
     clientId: config.DEMO_SPA_CLIENT_ID,
     scope: `api://${config.DEMO_BLUEPRINT_CLIENT_ID}/${config.DEMO_USER_SCOPE}`,
     origin: config.DEMO_ORIGIN,
+    localEvaluations: localEvaluationsEnabled(config),
   };
+}
+
+export function localEvaluationsEnabled(config: DemoConfig, mode = process.env.NODE_ENV) {
+  return mode === "development" && config.DEMO_AUTH_MODE === "certificate"
+    && ["localhost", "127.0.0.1"].includes(new URL(config.DEMO_ORIGIN).hostname);
 }

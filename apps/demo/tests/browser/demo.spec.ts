@@ -11,9 +11,9 @@ const scope = `api://${blueprint}/access_agent_as_user`;
 const authority = `https://login.microsoftonline.com/${tenant}/v2.0`;
 const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
 
-async function mockSignIn(page: Page, renewal?: { requests: number; reject: boolean }) {
+async function mockSignIn(page: Page, renewal?: { requests: number; reject: boolean }, localEvaluations = false) {
   let nonce = "";
-  await page.route("**/api/config", (route) => route.fulfill({ json: { tenantId: tenant, clientId, scope, origin } }));
+  await page.route("**/api/config", (route) => route.fulfill({ json: { tenantId: tenant, clientId, scope, origin, localEvaluations } }));
   await page.context().route("https://login.microsoftonline.com/**", async (route) => {
     const url = new URL(route.request().url());
     if (url.pathname.includes("/authorize")) {
@@ -99,6 +99,83 @@ test("configuration failures are visible without exposing environment values", a
   await expect(page.getByRole("heading", { name: "Foundry + agentgateway" })).toBeVisible();
   await expect(page.getByRole("alert").filter({ hasText: "configuration is incomplete" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Sign in with Microsoft" })).toHaveCount(0);
+});
+
+test("local smoke UI reuses the in-memory assertion and displays both scored summaries without text or tokens", async ({ page }) => {
+  await mockSignIn(page, undefined, true);
+  await page.route("**/api/copilotkit/**", (route) => route.fulfill({
+    json: { agents: { hosted: { name: "hosted", description: "Offline tutor" } } },
+  }));
+  let runs = 0;
+  await page.route("**/api/evaluations", (route) => {
+    runs++;
+    expect(route.request().headers().authorization).toBe("Bearer OFFLINE-BROWSER-ASSERTION");
+    expect(route.request().postData()).toBe(null);
+    return route.fulfill({ contentType: "application/x-ndjson", body: [
+      { type: "started", expectedCases: 32, output: "agents/ai-tutor-hosted-agent/.foundry/results/offline.jsonl" },
+      { type: "progress", completedCases: 1, expectedCases: 32, tutor: "hosted", caseId: "math-one", status: "scored", requestId: "offline-1" },
+      { type: "complete", interrupted: false, qualityGate: "failed",
+        output: "agents/ai-tutor-hosted-agent/.foundry/results/offline.jsonl",
+        byTutor: [
+          { tutor: "hosted", expectedCases: 16, scored: 16, passed: 16, errors: 0, passRate: 1, qualityGate: "passed" },
+          { tutor: "prompt", expectedCases: 16, scored: 16, passed: 15, errors: 0, passRate: 15 / 16, qualityGate: "failed" },
+        ] },
+    ].map((item) => JSON.stringify(item)).join("\n") + "\n" });
+  });
+  await page.goto("/");
+  await expect(page.getByRole("button", { name: "Run smoke evaluations with judging" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Sign in with Microsoft" }).click();
+  await page.getByRole("button", { name: "Run smoke evaluations with judging" }).click();
+  await expect(page.getByRole("status").filter({ hasText: "Provisional quality gate: failed" })).toBeVisible();
+  await expect(page.getByLabel("Evaluation summaries")).toContainText("hosted: 16/16 scored, 16 passed");
+  await expect(page.getByLabel("Evaluation summaries")).toContainText("prompt: 16/16 scored, 15 passed");
+  await expect(page.getByLabel("Local tutor evaluations")).not.toContainText("OFFLINE-BROWSER-ASSERTION");
+  await expect(page.getByRole("button", { name: "Run smoke evaluations with judging" })).toBeEnabled();
+  expect(runs).toBe(1);
+});
+
+test("local smoke UI reports incomplete streams and permits cancellation", async ({ page }) => {
+  await mockSignIn(page, undefined, true);
+  await page.route("**/api/copilotkit/**", (route) => route.fulfill({
+    json: { agents: { hosted: { name: "hosted", description: "Offline tutor" } } },
+  }));
+  await page.route("**/api/evaluations", (route) => route.fulfill({
+    contentType: "application/x-ndjson", body: JSON.stringify({
+      type: "started", expectedCases: 32, output: "agents/ai-tutor-hosted-agent/.foundry/results/incomplete.jsonl",
+    }) + "\n",
+  }));
+  await page.goto("/");
+  await page.getByRole("button", { name: "Sign in with Microsoft" }).click();
+  const start = page.getByRole("button", { name: "Run smoke evaluations with judging" });
+  await start.click();
+  await expect(page.getByRole("alert").filter({ hasText: "ended before a summary arrived" })).toBeVisible();
+  await page.unroute("**/api/evaluations");
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  await page.route("**/api/evaluations", async (route) => {
+    await pending;
+    await route.fulfill({ status: 503, json: { error: { message: "Offline unavailable", requestId: "offline" } } });
+  });
+  await start.click();
+  await expect(start).toBeDisabled();
+  await page.getByRole("button", { name: "Cancel evaluations" }).click();
+  await expect(page.getByRole("alert").filter({ hasText: "Evaluation cancelled" })).toBeVisible();
+  release();
+  await expect(start).toBeEnabled();
+});
+
+test("production configuration hides evaluations and the real endpoint rejects direct calls", async ({ page }) => {
+  await mockSignIn(page);
+  await page.route("**/api/copilotkit/**", (route) => route.fulfill({
+    json: { agents: { hosted: { name: "hosted", description: "Offline tutor" } } },
+  }));
+  await page.goto("/");
+  await page.getByRole("button", { name: "Sign in with Microsoft" }).click();
+  await expect(page.getByLabel("Tutor chat", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Run smoke evaluations with judging" })).toHaveCount(0);
+  const response = await page.request.post("/api/evaluations", { headers: { origin } });
+  expect(response.status()).toBe(404);
+  expect((await response.json()).error.code).toBe("local_evaluations_disabled");
 });
 
 test("MSAL sign-in, CopilotKit streaming, independent tutor selection, reset and sign-out", async ({ page }) => {

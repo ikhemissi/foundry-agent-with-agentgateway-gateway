@@ -12,7 +12,8 @@
     "lint": "eslint .",
     "test": "tsx --test tests/*.test.ts",
     "test:browser": "playwright test",
-    "test:live": "tsx scripts/test-live.ts"
+    "test:live": "tsx scripts/test-live.ts",
+    "eval": "tsx scripts/evaluate-tutors.ts"
   },
   "dependencies": {
     "@ag-ui/client": "1.0.2",
