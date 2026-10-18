@@ -94,3 +94,31 @@ test('Git ignores local secrets, build outputs and virtual environments', () => 
   }).trim().split('\n');
   assert.deepEqual(ignored, paths.slice(0, 8));
 });
+
+test('demo configuration, keys, dependencies and build outputs stay local', () => {
+  const paths = [
+    '.certificates/demo.key', '.certificates/demo.pem', 'apps/demo/.env.local',
+    'apps/demo/node_modules/next/package.json', 'apps/demo/.next/server/app/page.js',
+    'apps/demo/test-results/result.json', 'apps/demo/playwright-report/index.html',
+    'apps/demo/tsconfig.tsbuildinfo',
+  ];
+  const ignored = execFileSync('git', ['check-ignore', '--no-index', '--stdin'], {
+    cwd: fileURLToPath(root), input: `${paths.join('\n')}\n`, encoding: 'utf8',
+  }).trim().split('\n');
+  assert.deepEqual(ignored, paths);
+});
+
+test('demo adds separate npm tasks and debugging without replacing hosted F5', async () => {
+  const [tasks, launch, manifest] = await Promise.all([
+    loadJson('.vscode/tasks.json'), loadJson('.vscode/launch.json'), loadJson('apps/demo/package.json'),
+  ]);
+  assert.equal(launch.configurations[0].type, 'debugpy');
+  assert.equal(launch.configurations.find((entry) => entry.name === 'Debug CopilotKit demo').cwd, '${workspaceFolder}/apps/demo');
+  assert.equal(tasks.tasks.find((entry) => entry.label === 'Run CopilotKit demo').command, 'npm');
+  assert.equal(manifest.engines.node, '>=22');
+  assert.equal(manifest.dependencies['@ag-ui/client'], '1.0.2');
+  assert.equal(manifest.dependencies['@copilotkit/runtime'], manifest.dependencies['@copilotkit/react-core']);
+  for (const path of ['apps/demo/.env.example', 'apps/demo/package-lock.json', 'infra/demo-entra.bicep']) {
+    assert.ok((await readFile(new URL(path, root))).length);
+  }
+});

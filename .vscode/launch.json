@@ -12,6 +12,14 @@
       "preLaunchTask": "Open hosted tutor Inspector",
       "justMyCode": true,
       "internalConsoleOptions": "neverOpen"
+    },
+    {
+      "name": "Debug CopilotKit demo",
+      "type": "node-terminal",
+      "request": "launch",
+      "command": "npm run dev",
+      "cwd": "${workspaceFolder}/apps/demo",
+      "env": { "NEXT_TELEMETRY_DISABLED": "1" }
     }
   ]
 }

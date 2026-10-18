@@ -10,3 +10,10 @@ __pycache__/
 *.pyc
 *.egg-info/
 .pytest_cache/
+node_modules/
+.next/
+coverage/
+playwright-report/
+test-results/
+*.tsbuildinfo
+.certificates/

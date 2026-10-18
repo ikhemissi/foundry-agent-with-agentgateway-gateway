@@ -23,8 +23,11 @@ shared inference key.
 > **Validation:** the identity-only gateway and hosted runtime are tested locally,
 > including streaming and denial cases. The previous deployment used hosted
 > app-only authentication. Genuine Agent ID user-via-agent inference was verified
-> separately, but this repository does not deploy the trusted sign-in/OBO backend.
-> Do not treat ordinary playground access as a working delegated caller.
+> separately. The [local CopilotKit demo](apps/demo) now implements the trusted
+> sign-in/OBO backend in Next.js, with offline identity, runtime, and browser tests.
+> Its complete live flow against this repository's deployment still requires the
+> explicit setup and acceptance checks below. Ordinary playground access is not
+> evidence of a working delegated caller.
 
 ## Architecture
 
@@ -54,7 +57,7 @@ The prompt caller's human identity is **not** propagated to agentgateway.
 ```mermaid
 flowchart LR
     User["Learner"]
-    Backend["Trusted sign-in / Agent ID OBO backend"]
+    Backend["Next.js CopilotKit + Agent ID OBO"]
     Hosted["Foundry hosted tutor"]
     Gateway["agentgateway on Container Apps"]
     Model["Source Foundry model"]
@@ -79,6 +82,7 @@ to the source model. Both Foundry accounts disable local API-key authentication.
 - Azure CLI 2.73+, Azure Developer CLI 1.35+, and Bicep 0.36.1+.
 - Foundry agents azd extension 1.0.0-beta.18+.
 - Bash and Node.js 20+ for deployment hooks and tests.
+- Node.js 22+ and npm for the optional local CopilotKit demo.
 - Python 3.13 for local hosted development; remote builds do not require it.
 - Subscription quota for `gpt-5.4-nano`, version `2026-03-17`, `GlobalStandard`.
 - East US (`eastus`, default), UK South (`uksouth`), or Sweden Central
@@ -95,10 +99,15 @@ to the source model. Both Foundry accounts disable local API-key authentication.
   [Agent ID OBO exchange](https://learn.microsoft.com/en-us/entra/agent-id/agent-on-behalf-of-oauth-flow).
   Configure the hosted blueprint's user-facing API, delegated gateway permission,
   consent, and permission inheritance. Use a federated credential or certificate
-  for that backend. These are external prerequisites, not deployed by this sample.
-- The trusted backend needs Foundry invocation access and the
+  for that backend. The optional demo setup below configures these explicitly.
+- The demo calls Foundry with a **delegated user-via-agent Foundry token**; the
+  authorized human already receives Foundry User during provisioning. This is
+  separate from the gateway-scoped delegated token forwarded to the hosted tutor.
+  It deliberately does not fall back to workload authentication.
+- If you instead implement Foundry's separate workload-authenticated invocation
+  pattern with `x-ms-user-identity`, that workload needs invocation access and the
   `Microsoft.CognitiveServices/accounts/AIServices/agents/endpoints/UserIdentityImpersonation/action`
-  data action when representing the user.
+  data action when representing the user. The demo does not select that pattern.
 
 Entra directory permissions do not replace Azure RBAC. Contributor alone cannot
 create role assignments. Scripts assume a signed-in human; CI service-principal
@@ -223,9 +232,8 @@ Invoke through the trusted backend using
 [Foundry's delegated-token forwarding](https://learn.microsoft.com/en-us/azure/foundry/agents/how-to/use-on-behalf-of-flow):
 
 ```http
-Authorization: Bearer <Foundry access token>
+Authorization: Bearer <delegated user-via-agent Foundry access token>
 x-client-agentgateway-access-token: <user-via-agent gateway access token>
-x-ms-user-identity: <authenticated human object ID>
 Content-Type: application/json
 
 {"input":"Explain fractions.","store":false,"background":false,"stream":false}
@@ -238,6 +246,13 @@ supported. Missing or denied credentials never cause a different identity to be
 used. `DefaultAzureCredential` is used only for telemetry, not model inference.
 The OpenAI SDK parameter named `api_key` carries the delegated bearer token; it
 does not enable shared-key authentication.
+
+The demo uses the
+[named agent Responses endpoints](https://learn.microsoft.com/en-us/azure/foundry/agents/quickstarts/prompt-agent)
+for both tutors. It does not send `x-ms-user-identity`: that header belongs to the
+separate workload-impersonation pattern described in Foundry's OBO documentation.
+Direct delegated Foundry invocation plus gateway-token forwarding is the
+combination the live checks are designed to validate here.
 
 ### Local development
 
@@ -254,6 +269,275 @@ start without a delegated token, but **every inference request must supply one**
 A plain playground/Inspector/azd chat request without the forwarding header is
 rejected; use a caller capable of sending the required headers and stateless
 request body.
+
+## Local CopilotKit demo
+
+[apps/demo](apps/demo) is one Next.js application: React/CopilotKit and MSAL in the
+browser, plus JWT validation, certificate-based Agent ID OBO, and a streaming
+Responses-to-AG-UI adapter on the server. There is no Python/FastAPI middle tier
+and no local model or extra agent. The hosted tutor still runs Python/MAF in
+Foundry. Both tutors keep their existing definitions and gateway policies.
+
+```text
+Browser -- SPA user token --> Next.js trusted backend
+                              | certificate -> blueprint exchange token
+                              | child hosted Agent ID + user assertion -> Foundry token
+                              | child hosted Agent ID + user assertion -> gateway token (hosted only)
+                              +--> named Foundry tutor Responses endpoint
+                                    +--> agentgateway --> source model
+```
+
+The browser token targets the hosted agent's **parent blueprint API**, not the
+gateway or Foundry. The backend checks its signature, issuer, tenant, audience,
+SPA client, delegated scope, expiration, and authorized human before any OBO
+exchange. Only that human is allowed; signing in as another tenant user is not
+enough. Agent IDs, endpoints, scope names, and credentials come from server
+configuration, never browser-provided overrides.
+
+### 1. Prepare local dependencies and a certificate
+
+Use Node.js 22 or later. From the repository root:
+
+```bash
+npm ci --prefix apps/demo
+mkdir -p .certificates
+chmod 700 .certificates
+```
+
+Generate a dedicated local certificate only if these files do not already exist.
+Do not overwrite an existing credential just to restart the app:
+
+```bash
+(umask 077; openssl req -x509 -newkey rsa:2048 -nodes \
+  -keyout .certificates/demo.key -out .certificates/demo.pem \
+  -days 365 -subj "/CN=foundry-agentgateway-local-demo")
+chmod 600 .certificates/demo.key
+```
+
+These files are ignored by Git. The public certificate is uploaded to the parent
+blueprint; the private key stays on this machine. Neither its contents nor a
+client secret are written to azd environment state. For production, prefer
+managed-identity federation and a hosted, access-controlled backend rather than
+copying the local private key to a service.
+
+### 2. Preview, then explicitly configure Entra
+
+First deploy the hosted tutor so `HOSTED_AGENT_PRINCIPAL_ID` identifies the actual
+hosted Agent ID. Sign in to Azure CLI in the same tenant as the selected azd
+environment. With an existing deployment, prepare the caller before switching
+gateway authentication as described under migration.
+
+```bash
+node scripts/configure-demo-entra.mjs
+```
+
+The [setup helper](scripts/configure-demo-entra.mjs) defaults to **read-only
+preview**. It discovers and checks the hosted identity's real parent blueprint,
+then describes the API scope, public certificate, two downstream permissions,
+user-specific grants, and dedicated SPA registration. Review the plan before:
+
+```bash
+node scripts/configure-demo-entra.mjs --apply
+node scripts/configure-demo-entra.mjs --write-env
+```
+
+`--apply` performs directory changes and saves only the nonsecret SPA/blueprint
+IDs and origin in azd. [demo-entra.bicep](infra/demo-entra.bicep) uses the existing
+pinned Graph extension for the SPA, service principal, and SPA-to-blueprint
+consent. Narrow Graph REST operations adopt the existing Foundry-owned blueprint,
+preserve unrelated API settings, credentials, scopes, and grants, and configure
+its Agent ID inheritance, which this pinned Bicep extension does not model.
+The helper rereads Graph and fails if blueprint changes did not persist.
+
+The downstream permissions are `https://ai.azure.com` / `user_impersonation` and
+the gateway API / `gateway.invoke`. Consent grants are for `AZURE_PRINCIPAL_ID`,
+not tenant-wide. **Blueprint inheritance applies to its child identities**, not
+just this UI: review other children before applying. Existing broad inheritance
+or grants are preserved, not silently narrowed. The helper does not grant Azure
+RBAC or rotate/delete existing credentials. Agent ID blueprint administration
+and delegated-consent permissions can require additional directory roles; an
+application-management role alone is not a guarantee.
+
+`--write-env` exports an allowlist to ignored `apps/demo/.env.local` with mode
+`0600`. It refuses to overwrite an existing file, validates private-key file
+permissions, and never exports the prompt client's secret. Review the existing
+file before explicitly removing/re-exporting it. See
+[.env.example](apps/demo/.env.example) for the configuration contract.
+`DEMO_CERTIFICATE_PATH` and `DEMO_PRIVATE_KEY_PATH` can point to alternative
+absolute paths. Set `DEMO_ORIGIN` before preview/apply to use a different origin.
+
+The default origin is **`http://localhost:3000`** and the registered SPA callback
+is **`http://localhost:3000/auth/callback`**. MSAL uses a dedicated redirect-bridge
+page and **popup sign-in**, allowing access tokens to remain memory-only; allow
+the popup. Do not browse `127.0.0.1` while configuring `localhost`, or change the
+port without updating the origin/registration.
+
+### 3. Start and compare the tutors
+
+```bash
+npm run dev --prefix apps/demo
+```
+
+Open `http://localhost:3000` or select **Debug CopilotKit demo** in VS Code.
+The server binds to loopback. Sign in as the configured human, choose the hosted
+or prompt tutor, and send a message. Chat is text-only, with 1-40 messages per
+request, at most 16,000 characters per message and a 128 KiB request limit.
+Client-defined tools, system instructions, endpoint overrides, and attachments
+are unsupported. The upstream run is foreground, streamed, and `store:false`;
+the current page supplies its history. There is no shared chat store or global
+downstream token cache. Resetting, changing tutor, signing out, or reloading the
+page discards chat history. Upstream work is aborted when the chat request is
+cancelled. This does not assert that Azure diagnostics retain no operational data.
+
+Sign-in tokens renew silently while the page is open. If interaction is needed,
+chat unmounts until sign-in is renewed. The backend remains authoritative even
+when the browser has a token. Errors expose safe stage/code/request identifiers,
+not assertions, private keys, token endpoint response bodies, or model prompts.
+CopilotKit server telemetry is disabled; the existing Azure monitoring remains.
+
+### 4. Test offline, then run explicit live acceptance
+
+```bash
+npm test --prefix apps/demo
+npm run typecheck --prefix apps/demo
+npm run lint --prefix apps/demo
+npm run build --prefix apps/demo
+cd apps/demo
+npx playwright install --with-deps chromium
+npm run test:browser
+```
+
+Browser tests use mocked Entra and Foundry responses with the real CopilotKit
+runtime/adapter, including a real MSAL popup/redirect-bridge round trip, chat,
+tutor isolation, reset, and sign-out. No authentication bypass is exposed by
+the application; test doubles are confined to the test runner.
+Server tests use signed local JWTs, real certificate assertions, mocked token
+endpoints and Responses streams, and the real CopilotKit HTTP runtime. They cover
+wrong tenant/user/caller/audience/scope, expiry, credential isolation, malformed
+and truncated streams, HTTP-200 failure events, cancellation, and output limits.
+The Graph setup tests also verify preview-only behavior, preservation,
+user-specific consent, persistence checks, and safe environment export.
+
+Offline success is **not** proof of deployed user OBO. After the explicit
+identity setup and identity-only rollout, sign in and select **Run live checks**:
+
+- Verify the signed gateway token's human, hosted actor, audience, tenant, and scope.
+- Complete hosted streaming and a stateless follow-up.
+- Complete prompt streaming through its existing managed OAuth2 connection.
+- Confirm the delegated gateway route denies missing and wrong-audience tokens.
+- Confirm the old `/v1/chat/completions` route returns 404.
+
+This makes **three model calls** and can incur Azure charges. It does not mutate
+Azure, deploy, create credentials, or remove the legacy key. Results contain only
+check names, duration, and request IDs. A failed check is not reported as passed.
+Expired tokens, wrong gateway actors/users, and stream failure cases are tested
+offline; the live button does not mint extra identities just to reproduce them.
+The prompt success check relies on the deployed OAuth2 connection and the
+gateway's strict prompt-client policy; use Azure diagnostics for that identity's
+audit trail.
+
+Select **Check silent renewal** to bypass MSAL's access-token cache and request a
+token from Entra. The UI reports only success and expiry, never token contents.
+Then rerun the live checks to verify that the renewed token works through OBO.
+If Entra requires interaction, the chat is unmounted, in-flight live checks are
+aborted, and **Renew sign-in** is offered. This forced-renewal check does not
+prove natural expiry or a multi-hour session; those need a separate soak test.
+Browser regression tests simulate successful renewal and interaction-required
+recovery; they are not live Entra evidence.
+
+For a caller that already supplies a legitimate SPA-to-blueprint assertion via
+a protected file or stdin, an equivalent CLI runner is available:
+
+```bash
+cd apps/demo
+npm run test:live -- --token-file /absolute/path/to/owner-only-assertion-file
+# Or pipe the assertion from a trusted source:
+# <trusted-source> | npm run test:live -- --stdin
+```
+
+Do not paste tokens into command-line arguments, terminal output, source files,
+or shared logs. The UI button needs no manual token extraction and is preferred.
+Delete any temporary assertion file after use. The CLI does not sign in as an
+application if a user assertion is missing or rejected.
+
+For certificate rotation, generate a new pair at different ignored paths,
+preview/apply the new public certificate, update the local paths, and test both
+tutors before separately retiring the old certificate. Nothing deletes or
+replaces an old credential automatically.
+
+## Azure-hosted CopilotKit demo: managed identity federation
+
+The same Next.js app can run as a **separate Container App in the gateway's
+existing ACA environment**, using its own user-assigned managed identity. It
+does not reuse the gateway identity or run inside the Foundry hosted tutor.
+The managed identity is trusted by a federated identity credential on the
+existing hosted Agent ID blueprint.
+
+```text
+Browser user token -> Next.js backend
+                       | managed identity token -> blueprint exchange token
+                       | child Agent ID + user token -> delegated Foundry/gateway tokens
+                       +-> existing Foundry tutors -> agentgateway -> source model
+```
+
+This replaces only the blueprint credential, not delegated user authentication.
+The gateway still requires the configured human and hosted Agent ID. There is
+no app-only, certificate, or API-key fallback when managed identity fails.
+The app uses an explicit `ManagedIdentityCredential` with the dedicated identity's
+client ID, not a general developer credential chain.
+
+After completing the existing gateway, hosted tutor, and demo Entra setup:
+
+```bash
+# Read-only preview, bound to the selected azd environment:
+node scripts/deploy-demo.mjs
+# Provision, federate, remotely build, deploy, and check public configuration:
+node scripts/deploy-demo.mjs --apply
+```
+
+The [deployment helper](scripts/deploy-demo.mjs) uses
+[demo-hosting.bicep](infra/demo-hosting.bicep) as a separate resource-group
+deployment alongside the main azd infrastructure. It creates a dedicated Basic
+ACR registry, dedicated identity, registry-scoped AcrPull assignment, and the
+Next.js app. These incur additional Azure charges. It does not redeploy the
+gateway or Foundry tutors. Rerun this helper after changing the demo; the root
+`azd deploy` still deploys the Foundry hosted tutor, not the web app.
+
+ACR builds the image remotely; no local container daemon or registry password
+is needed. The [Docker context allowlist](apps/demo/.dockerignore) excludes local
+environment files, certificates, dependencies, and test artifacts. The production
+image runs as a non-root user, contains Next.js standalone output, and is deployed
+by immutable image digest. The app uses HTTPS ingress, readiness/startup probes,
+and scales from zero to one replica. CopilotKit's in-memory runner coordinates
+Stop requests within one process; multiple replicas require shared run coordination.
+Active runs do not survive a restart or redeployment. Stop aborts the bridge's
+Foundry HTTP request, but does not prove that Foundry or the model stops billing.
+
+The helper preserves existing SPA callbacks, including localhost, adds the
+hosted HTTPS callback, and preserves existing blueprint keys and unrelated
+federated credentials. It refuses to replace an existing demo federation that
+trusts a different identity. The federation uses the managed identity's
+**principal ID** as subject; runtime selection uses its **client ID**.
+Only nonsecret identifiers and `DEMO_HOSTED_ENDPOINT` are saved to azd.
+The existing local `DEMO_ORIGIN` and ignored local configuration are not replaced.
+No certificate or private-key path is configured in the Azure app.
+
+Open `DEMO_HOSTED_ENDPOINT`, sign in as the configured human, and select
+**Run live checks**. This verifies the same delegated flows and gateway denials
+as the local demo, now bootstrapped by the Azure managed identity.
+Deployment readiness alone does not prove the delegated exchanges.
+
+Credential mode is explicit:
+
+- Local: `DEMO_AUTH_MODE=certificate`, loopback origin, certificate and private-key
+  paths. Existing local environment files must add this mode when upgrading.
+- Azure: `DEMO_AUTH_MODE=managed-identity`,
+  `DEMO_MANAGED_IDENTITY_CLIENT_ID=<dedicated-UAMI-client-id>`, and no certificate
+  paths. Managed identity is not available merely by signing in to Azure CLI
+  from an ordinary local process.
+
+See Microsoft's [Agent ID OBO protocol](https://learn.microsoft.com/entra/agent-id/agent-on-behalf-of-oauth-flow)
+and [managed identity federation configuration](https://learn.microsoft.com/entra/workload-id/workload-identity-federation-config-app-trust-managed-identity).
 
 ## Existing-environment migration
 
@@ -323,7 +607,7 @@ validation. Monitoring reader permissions can expose sensitive GenAI data.
 
 ```bash
 node --test tests/infra.test.mjs tests/agent.test.mjs tests/deployment.test.mjs \
-  tests/entra.test.mjs tests/migration.test.mjs tests/gateway.test.mjs
+  tests/entra.test.mjs tests/migration.test.mjs tests/demo-entra.test.mjs tests/gateway.test.mjs
 agents/ai-tutor-hosted-agent/.venv/bin/python -m unittest discover \
   -s agents/ai-tutor-hosted-agent -p 'test_*.py'
 ```

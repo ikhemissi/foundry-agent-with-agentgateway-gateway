@@ -5,7 +5,7 @@
       "label": "Test project scaffold",
       "type": "process",
       "command": "node",
-      "args": ["--test", "tests/agent.test.mjs", "tests/deployment.test.mjs", "tests/migration.test.mjs"],
+      "args": ["--test", "tests/agent.test.mjs", "tests/deployment.test.mjs", "tests/migration.test.mjs", "tests/demo-entra.test.mjs", "tests/demo-hosting.test.mjs"],
       "options": {
         "cwd": "${workspaceFolder}"
       },
@@ -35,6 +35,33 @@
         "cwd": "${workspaceFolder}"
       },
       "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "Run CopilotKit demo",
+      "type": "process",
+      "command": "npm",
+      "args": ["run", "dev"],
+      "options": {
+        "cwd": "${workspaceFolder}/apps/demo",
+        "env": { "NEXT_TELEMETRY_DISABLED": "1" }
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Test CopilotKit demo",
+      "type": "process",
+      "command": "npm",
+      "args": ["test"],
+      "options": { "cwd": "${workspaceFolder}/apps/demo" },
+      "problemMatcher": []
+    },
+    {
+      "label": "Preview demo Entra setup",
+      "type": "process",
+      "command": "node",
+      "args": ["scripts/configure-demo-entra.mjs"],
+      "options": { "cwd": "${workspaceFolder}" },
       "problemMatcher": []
     },
     {
