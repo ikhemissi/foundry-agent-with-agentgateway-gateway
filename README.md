@@ -20,14 +20,22 @@ connection, or hosted app-only authentication mode. The prompt OAuth client
 secret remains necessary for the managed ModelGateway connection; it is not a
 shared inference key.
 
-> **Validation:** the identity-only gateway and hosted runtime are tested locally,
-> including streaming and denial cases. The previous deployment used hosted
-> app-only authentication. Genuine Agent ID user-via-agent inference was verified
-> separately. The [local CopilotKit demo](apps/demo) now implements the trusted
-> sign-in/OBO backend in Next.js, with offline identity, runtime, and browser tests.
-> Its complete live flow against this repository's deployment still requires the
-> explicit setup and acceptance checks below. Ordinary playground access is not
-> evidence of a working delegated caller.
+**Live validation completed on 18 October 2026:** both tutors work through the
+CopilotKit demo, including Azure-hosted managed-identity federation, delegated
+Agent ID OBO, token renewal, and streaming Stop/recovery. The legacy shared key
+and its secret-scoped reader assignment have been removed from the tested
+environment. See [validation status](#validation-status) for evidence and limits.
+
+## Start here
+
+| Goal | Section |
+| --- | --- |
+| Understand the identities and request paths | [Architecture](#architecture) |
+| Create a new environment | [Deploy](#deploy) |
+| Run the demo on your machine | [Local CopilotKit demo](#local-copilotkit-demo) |
+| Host the demo with managed identity | [Azure-hosted demo](#azure-hosted-copilotkit-demo-managed-identity-federation) |
+| Upgrade an older API-key deployment | [Migration](#existing-environment-migration) |
+| Understand what is verified and what remains | [Validation status](#validation-status) |
 
 ## Architecture
 
@@ -35,12 +43,14 @@ shared inference key.
 
 ```mermaid
 flowchart LR
-    User["Learner"]
+    User["Learner + browser SPA"]
+    Backend["Next.js demo backend"]
     Tutor["Foundry prompt tutor"]
     Connection["ModelGateway connection"]
     Gateway["agentgateway on Container Apps"]
     Model["Source Foundry model"]
-    User -->|"Entra authentication"| Tutor
+    User -->|"User token for blueprint API"| Backend
+    Backend -->|"Agent ID OBO: delegated Foundry token"| Tutor
     Tutor -->|"agentgateway-gateway/gpt-5.4-nano"| Connection
     Connection -->|"OAuth2 application token"| Gateway
     Gateway -->|"Managed identity + Azure RBAC"| Model
@@ -51,18 +61,20 @@ prompt client's credentials. The `/entra/v1/chat/completions` route requires
 that application's service principal (`oid`), client ID (`azp`), and app-only
 token type. It rejects delegated users and the hosted agent's app-only identity.
 The prompt caller's human identity is **not** propagated to agentgateway.
+The demo authenticates the user and performs Agent ID OBO to invoke Foundry,
+but the managed connection independently obtains the prompt application's token.
 
 ### Hosted tutor: user-via-agent model access
 
 ```mermaid
 flowchart LR
-    User["Learner"]
-    Backend["Next.js CopilotKit + Agent ID OBO"]
+    User["Learner + browser SPA"]
+    Backend["Next.js demo backend"]
     Hosted["Foundry hosted tutor"]
     Gateway["agentgateway on Container Apps"]
     Model["Source Foundry model"]
-    User --> Backend
-    Backend -->|"Foundry invocation + forwarded delegated token"| Hosted
+    User -->|"User token for blueprint API"| Backend
+    Backend -->|"Delegated Foundry bearer + forwarded gateway token"| Hosted
     Hosted -->|"User-via-agent gateway token"| Gateway
     Gateway -->|"Managed identity + Azure RBAC"| Model
 ```
@@ -74,6 +86,42 @@ deploying human; adapt that explicit policy for your application.
 
 The gateway's managed identity, not the incoming token, authenticates upstream
 to the source model. Both Foundry accounts disable local API-key authentication.
+
+### Demo authentication: same OBO flow, different backend credentials
+
+```mermaid
+flowchart TB
+    Browser["Browser: CopilotKit + MSAL"]
+    Backend["Next.js: validate user token"]
+    MI["Azure demo: dedicated managed identity"]
+    Cert["Local development: certificate"]
+    Blueprint["Entra: parent Agent ID blueprint exchange"]
+    Child["Entra: child hosted Agent ID OBO"]
+    FoundryToken["Delegated Foundry token: both tutors"]
+    GatewayToken["Delegated gateway token: hosted tutor only"]
+    Browser -->|"SPA token for blueprint API"| Backend
+    Backend -->|"Azure credential mode"| MI
+    Backend -->|"Local credential mode"| Cert
+    MI -->|"Federated client assertion"| Blueprint
+    Cert -->|"Signed client assertion"| Blueprint
+    Blueprint -->|"Exchange token + original user assertion"| Child
+    Child --> FoundryToken
+    Child --> GatewayToken
+```
+
+| Boundary | Identity / credential | Purpose |
+| --- | --- | --- |
+| Browser → demo | Signed-in human; SPA token for the blueprint API | Authenticate the configured demo user |
+| Azure demo → blueprint | Dedicated demo managed identity, trusted by a blueprint federated credential | Bootstrap the exchange without a certificate or client secret |
+| Local demo → blueprint | Local RSA certificate assertion | Development-only alternative; not deployed to Azure |
+| Demo → Foundry | Human user via hosted Agent ID | Invoke either named tutor endpoint |
+| Hosted tutor → gateway | Human `oid`, hosted Agent ID `azp`, `gateway.invoke` | Use the delegated gateway route |
+| Prompt connection → gateway | Dedicated prompt application | Use the app-only OAuth2 gateway route |
+| Gateway → source model | Separate gateway managed identity | Authenticate upstream with Azure RBAC |
+
+The **demo identity**, **hosted Agent ID**, **prompt application**, and **gateway
+identity** are distinct. Managed identity replaces the demo backend's blueprint
+credential; it does not replace the human or turn OBO into app-only inference.
 
 ## Requirements
 
@@ -252,7 +300,7 @@ The demo uses the
 for both tutors. It does not send `x-ms-user-identity`: that header belongs to the
 separate workload-impersonation pattern described in Foundry's OBO documentation.
 Direct delegated Foundry invocation plus gateway-token forwarding is the
-combination the live checks are designed to validate here.
+combination verified by the live checks in the tested environment.
 
 ### Local development
 
@@ -273,19 +321,17 @@ request body.
 ## Local CopilotKit demo
 
 [apps/demo](apps/demo) is one Next.js application: React/CopilotKit and MSAL in the
-browser, plus JWT validation, certificate-based Agent ID OBO, and a streaming
+browser, plus JWT validation, Agent ID OBO, and a streaming
 Responses-to-AG-UI adapter on the server. There is no Python/FastAPI middle tier
 and no local model or extra agent. The hosted tutor still runs Python/MAF in
 Foundry. Both tutors keep their existing definitions and gateway policies.
 
-```text
-Browser -- SPA user token --> Next.js trusted backend
-                              | certificate -> blueprint exchange token
-                              | child hosted Agent ID + user assertion -> Foundry token
-                              | child hosted Agent ID + user assertion -> gateway token (hosted only)
-                              +--> named Foundry tutor Responses endpoint
-                                    +--> agentgateway --> source model
-```
+| Run location | Backend blueprint credential | Hosting |
+| --- | --- | --- |
+| Local development | Certificate; explicit `DEMO_AUTH_MODE=certificate` | Loopback-only Next.js server |
+| Azure | Federated managed identity; explicit `DEMO_AUTH_MODE=managed-identity` | Separate demo Container App |
+
+Both use the [same two-stage OBO flow](#demo-authentication-same-obo-flow-different-backend-credentials).
 
 The browser token targets the hosted agent's **parent blueprint API**, not the
 gateway or Foundry. The backend checks its signature, issuer, tenant, audience,
@@ -384,10 +430,16 @@ or prompt tutor, and send a message. Chat is text-only, with 1-40 messages per
 request, at most 16,000 characters per message and a 128 KiB request limit.
 Client-defined tools, system instructions, endpoint overrides, and attachments
 are unsupported. The upstream run is foreground, streamed, and `store:false`;
-the current page supplies its history. There is no shared chat store or global
-downstream token cache. Resetting, changing tutor, signing out, or reloading the
-page discards chat history. Upstream work is aborted when the chat request is
-cancelled. This does not assert that Azure diagnostics retain no operational data.
+the current page supplies its history. There is no application database or global
+downstream token cache. CopilotKit keeps bounded process-local run/event state
+for runtime coordination; it is not a durable chat store. Resetting, changing
+tutor, signing out, or reloading the page starts a fresh UI conversation; it does
+not promise immediate erasure of runtime memory or Azure diagnostic records.
+
+**Stop** aborts the bridge's active Foundry HTTP request. The next request can
+continue normally; this was verified live after fixing the adapter's
+`abortRun()` implementation. Cancellation does not prove that Foundry or the
+source model stops computation or billing.
 
 Sign-in tokens renew silently while the page is open. If interaction is needed,
 chat unmounts until sign-in is renewed. The backend remains authoritative even
@@ -409,12 +461,15 @@ npm run test:browser
 
 Browser tests use mocked Entra and Foundry responses with the real CopilotKit
 runtime/adapter, including a real MSAL popup/redirect-bridge round trip, chat,
-tutor isolation, reset, and sign-out. No authentication bypass is exposed by
+tutor isolation, reset, sign-out, forced silent renewal, and recovery when Entra
+requires interaction. No authentication bypass is exposed by
 the application; test doubles are confined to the test runner.
 Server tests use signed local JWTs, real certificate assertions, mocked token
 endpoints and Responses streams, and the real CopilotKit HTTP runtime. They cover
 wrong tenant/user/caller/audience/scope, expiry, credential isolation, malformed
 and truncated streams, HTTP-200 failure events, cancellation, and output limits.
+The actual CopilotKit Stop endpoint is tested for upstream abort, stale-run
+rejection, and a successful subsequent run on the same thread.
 The Graph setup tests also verify preview-only behavior, preservation,
 user-specific consent, persistence checks, and safe environment export.
 
@@ -473,12 +528,27 @@ does not reuse the gateway identity or run inside the Foundry hosted tutor.
 The managed identity is trusted by a federated identity credential on the
 existing hosted Agent ID blueprint.
 
-```text
-Browser user token -> Next.js backend
-                       | managed identity token -> blueprint exchange token
-                       | child Agent ID + user token -> delegated Foundry/gateway tokens
-                       +-> existing Foundry tutors -> agentgateway -> source model
+```mermaid
+flowchart LR
+    Browser["Browser SPA"]
+    subgraph ACA["Shared Azure Container Apps environment"]
+        Demo["Demo app: Next.js / CopilotKit"]
+        Gateway["Gateway app: agentgateway"]
+        Collector["Gateway OTel sidecar"]
+    end
+    Entra["Entra: blueprint federation + Agent ID OBO"]
+    Tutors["Consumer Foundry: prompt and hosted tutors"]
+    Source["Source Foundry model"]
+    Browser -->|"HTTPS + user token"| Demo
+    Demo <-->|"Dedicated demo managed identity + user assertion"| Entra
+    Demo -->|"Delegated Foundry invocation"| Tutors
+    Tutors -->|"Separate prompt / delegated routes"| Gateway
+    Gateway -->|"Gateway managed identity"| Source
+    Gateway -->|"Loopback OTLP"| Collector
 ```
+
+The Foundry tutors do **not** run in the shared Container Apps environment.
+The demo and gateway are separate apps with separate managed identities.
 
 This replaces only the blueprint credential, not delegated user authentication.
 The gateway still requires the configured human and hosted Agent ID. There is
@@ -529,12 +599,14 @@ Deployment readiness alone does not prove the delegated exchanges.
 
 Credential mode is explicit:
 
-- Local: `DEMO_AUTH_MODE=certificate`, loopback origin, certificate and private-key
-  paths. Existing local environment files must add this mode when upgrading.
-- Azure: `DEMO_AUTH_MODE=managed-identity`,
-  `DEMO_MANAGED_IDENTITY_CLIENT_ID=<dedicated-UAMI-client-id>`, and no certificate
-  paths. Managed identity is not available merely by signing in to Azure CLI
-  from an ordinary local process.
+| Mode | Required configuration | Restrictions |
+| --- | --- | --- |
+| Local certificate | `DEMO_AUTH_MODE=certificate`, certificate and private-key paths | Loopback development origin only |
+| Azure managed identity | `DEMO_AUTH_MODE=managed-identity`, `DEMO_MANAGED_IDENTITY_CLIENT_ID` | Rejects certificate/key settings; no credential fallback |
+
+Existing local environment files must add the explicit mode when upgrading.
+Managed identity is not available merely by signing in to Azure CLI from an
+ordinary local process.
 
 See Microsoft's [Agent ID OBO protocol](https://learn.microsoft.com/entra/agent-id/agent-on-behalf-of-oauth-flow)
 and [managed identity federation configuration](https://learn.microsoft.com/entra/workload-id/workload-identity-federation-config-app-trust-managed-identity).
@@ -569,6 +641,14 @@ It does not delete the prompt-client secret, inherited permissions, the vault,
 or telemetry permissions. Key Vault deletion is soft deletion, never purge.
 Incomplete metadata or resources remaining after deletion cause an explicit failure.
 
+**Tested environment cleanup — 18 October 2026:** in
+`agentgateway-uksouth-demo`, the obsolete vault secret was soft-deleted and its
+one exact-secret-scoped reader assignment was removed. The Container App shared
+key was already absent. A fresh preview confirmed no legacy cleanup resources
+remain; the prompt OAuth secret remains enabled. No purge was performed.
+These are environment-specific results, not an automatic migration for other
+deployments. Signed-in inference has not been rerun since this cleanup.
+
 Incremental Bicep alone does **not** remove previously created secrets or roles.
 The cleanup is explicit, not an automatic deployment hook.
 Remove obsolete `AGENTGATEWAY_AUTH_MODE`, `HOSTED_GATEWAY_AUTH_MODE`,
@@ -599,15 +679,67 @@ using the gateway identity. The hosted tutor exports telemetry using its own
 identity with sensitive-message capture disabled. Resource diagnostics from
 Foundry, Key Vault, and Container Apps target the shared workspace.
 
+```mermaid
+flowchart LR
+    Hosted["Foundry hosted tutor"] -->|"Identity-authenticated export"| Insights["Shared Application Insights"]
+    Prompt["Foundry prompt runtime"] -->|"Managed telemetry"| Insights
+    Gateway["agentgateway"] -->|"Loopback OTLP"| Collector["OTel collector sidecar"]
+    Collector -->|"Gateway managed identity"| Insights
+    Insights --> Workspace["Shared Log Analytics workspace"]
+    Resources["Foundry / Key Vault / Container Apps diagnostics"] --> Workspace
+```
+
+| Observability surface | Verified state / limit |
+| --- | --- |
+| Shared ingestion | Hosted tutor, prompt runtime, and gateway telemetry observed in Application Insights |
+| Distributed correlation | Hosted request, hosted dependencies, gateway request, and upstream span observed with the same `operation_Id` |
+| Credential-pattern scan | No JWT-like strings, bearer values, or private keys matched in the sampled two-hour window; not a guarantee about every possible secret form |
+| Demo backend | No Next.js Application Insights span export configured; no full browser → demo → Foundry distributed trace is claimed |
+| Sensitive data | Hosted sensitive-message capture is disabled; monitoring-reader access can still expose sensitive operational/GenAI data |
+
 Inspect Application Insights logs, Foundry agent traces, and workspace resource
-logs. End-to-end Azure ingestion/correlation and credential rotation still need
-validation. Monitoring reader permissions can expose sensitive GenAI data.
+logs. Do not print tokens, private keys, prompts, or model responses when
+collecting authentication evidence.
+
+## Validation status
+
+The following results apply to **`agentgateway-uksouth-demo`**, checked on
+**18 October 2026**. They are not certification of a new deployment.
+
+| Check | Result | Evidence / boundary |
+| --- | --- | --- |
+| Local certificate-backed demo | Passed live | User confirmed both tutor acceptance flows; deeper certificate-rotation testing is not a production acceptance gate |
+| Azure managed-identity OBO | Passed live | Signed gateway delegation plus both tutors, including hosted continuation |
+| Identity survives demo redeployment | Passed live | Dedicated identity and blueprint federation preserved; both tutors passed after redeployment |
+| Scale from zero | Passed live | `/api/config` returned HTTP 200 in 18.5 seconds from zero replicas |
+| Silent token renewal | Passed live | Explicit noncached Entra renewal, then all six acceptance checks passed |
+| Stop and recovery | Passed live | User confirmed streaming stopped and the next request completed after the fix |
+| Authorization denials | Passed live | Missing authorization and wrong-audience token denied; legacy route returns 404 |
+| Shared monitoring | Passed, bounded | Ingestion, hosted-to-gateway correlation, and sampled credential-pattern scan |
+| Legacy shared-key removal | Completed | Secret soft-deleted, exact-scoped reader removed, OAuth secret preserved |
+| Offline demo regression | Passed | 53 server tests, 3 browser tests, typecheck, lint, and production build |
+| Natural token expiry | **Pending** | A real long-session soak is still needed; forced renewal and mocked expiry are not substitutes |
+| Model-quality evaluation | **Deferred** | No quality dataset/evaluation acceptance gate configured |
+
+### Remaining checks and demo limits
+
+- Keep a signed-in session through **natural token expiry**, then verify
+  automatic renewal or explicit reauthentication and successful OBO.
+- Rerun **Run live checks** after the legacy-key cleanup for a fresh signed-in
+  inference check; cleanup dependency checks and endpoint denials already passed.
+- The demo is single-process/single-replica: active runs do not survive restart
+  or redeployment. Multi-replica operation needs shared run coordination.
+- Stop verifies client/bridge cancellation and recovery, **not** termination of
+  upstream computation or billing.
+- Plain playground/Agent Inspector access without the required forwarded token
+  is not evidence of delegated inference.
 
 ## Validate and clean up
 
 ```bash
 node --test tests/infra.test.mjs tests/agent.test.mjs tests/deployment.test.mjs \
-  tests/entra.test.mjs tests/migration.test.mjs tests/demo-entra.test.mjs tests/gateway.test.mjs
+  tests/entra.test.mjs tests/migration.test.mjs tests/demo-entra.test.mjs \
+  tests/demo-hosting.test.mjs tests/gateway.test.mjs
 agents/ai-tutor-hosted-agent/.venv/bin/python -m unittest discover \
   -s agents/ai-tutor-hosted-agent -p 'test_*.py'
 ```
