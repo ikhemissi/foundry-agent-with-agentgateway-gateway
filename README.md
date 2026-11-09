@@ -1,4 +1,16 @@
+<div align="center">
+
 # Microsoft Foundry agents with agentgateway
+
+**Foundry agents call models through agentgateway, and the gateway calls a model hosted in Foundry with its managed identity. Entra only, no shared key.**
+
+[![IaC: Bicep](https://img.shields.io/badge/IaC-Bicep-0078D4?style=flat-square)](infra)
+[![Deploy: azd](https://img.shields.io/badge/deploy-azd-0078D4?style=flat-square)](azure.yaml)
+[![Gateway: agentgateway](https://img.shields.io/badge/gateway-agentgateway-555555?style=flat-square)](agentgateway)
+
+[**Quick start**](#quick-start) · [**Architecture**](#architecture) · [**Use the tutors**](#use-and-update-the-tutors) · [**Validation**](docs/validation.md) · [**Documentation**](#documentation)
+
+</div>
 
 An azd + Bicep demonstration of **Microsoft Foundry and agentgateway integration
 in both directions**: Foundry agents call models through agentgateway, and the
@@ -24,19 +36,14 @@ shared inference key.
 CopilotKit demo, including Azure-hosted managed-identity federation, delegated
 Agent ID OBO, token renewal, and streaming Stop/recovery. The legacy shared key
 and its secret-scoped reader assignment have been removed from the tested
-environment. See [validation status](#validation-status) for evidence and limits.
+environment. See [validation status](docs/validation.md) for evidence and limits.
 
-## Start here
+## Why this sample
 
-| Goal | Section |
-| --- | --- |
-| Understand the identities and request paths | [Architecture](#architecture) |
-| Create a new environment | [Deploy](#deploy) |
-| Run the demo on your machine | [Local CopilotKit demo](#local-copilotkit-demo) |
-| Host the demo with managed identity | [Azure-hosted demo](#azure-hosted-copilotkit-demo-managed-identity-federation) |
-| Upgrade an older API-key deployment | [Migration](#existing-environment-migration) |
-| Review datasets, rubrics, costs, and evaluation commands | [Tutor evaluations](#tutor-evaluations) |
-| Understand what is verified and what remains | [Validation status](#validation-status) |
+An AI gateway such as agentgateway gives every model call one place for authentication, routing and telemetry. This
+sample connects it to Microsoft Foundry in both directions, with Entra ID only: the prompt agent reaches the gateway
+through a ModelGateway connection with its own client application, the hosted agent calls it as the signed-in user
+through its Entra Agent ID, and the gateway reaches the Foundry model with its managed identity.
 
 ## Architecture
 
@@ -124,9 +131,24 @@ The **demo identity**, **hosted Agent ID**, **prompt application**, and **gatewa
 identity** are distinct. Managed identity replaces the demo backend's blueprint
 credential; it does not replace the human or turn OBO into app-only inference.
 
-## Requirements
+## What runs where
 
-### Tooling and capacity
+| Path | What it is |
+|---|---|
+| [agents/](agents) | The two tutors: `ai-tutor-prompt-agent` (its definition) and `ai-tutor-hosted-agent` (Python, Microsoft Agent Framework) |
+| [agentgateway/](agentgateway) | The gateway's configuration and its Entra settings |
+| [apps/demo/](apps/demo) | The CopilotKit demo, run locally or hosted on Azure |
+| [infra/](infra) | Bicep: the bootstrap, the Foundry accounts, the gateway, the Entra registrations, the demo's hosting |
+| [scripts/](scripts) | Configuration and deployment scripts (Entra, the prompt agent, the demo, the evaluation assets) |
+| [evaluations/](evaluations) | The tutors' curated cases and rubric |
+| [monitoring/](monitoring) | The OpenTelemetry collector's configuration |
+| [tests/](tests) | Tests of the infrastructure, the scripts, the demo and the gateway |
+
+## Quick start
+
+### 1. Prerequisites
+
+#### Tooling and capacity
 
 - Azure CLI 2.73+, Azure Developer CLI 1.35+, and Bicep 0.36.1+.
 - Foundry agents azd extension 1.0.0-beta.18+.
@@ -137,7 +159,7 @@ credential; it does not replace the human or turn OBO into app-only inference.
 - East US (`eastus`, default), UK South (`uksouth`), or Sweden Central
   (`swedencentral`), subject to service availability and quota.
 
-### Permissions and delegated caller
+#### Permissions and delegated caller
 
 - **Azure provisioning:** permission to provision resources and assign roles:
   Owner, or Contributor plus an appropriate Azure RBAC administrator role.
@@ -162,13 +184,11 @@ Entra directory permissions do not replace Azure RBAC. Contributor alone cannot
 create role assignments. Scripts assume a signed-in human; CI service-principal
 deployment is not configured.
 
-## Deploy
-
 Fresh deployments have an explicit bootstrap stage: the vault must exist before
 the prompt OAuth credential can be stored. No temporary API-key deployment is
 needed.
 
-### 1. Bootstrap shared resources
+### 2. Bootstrap shared resources
 
 ```bash
 az login
@@ -200,7 +220,7 @@ Allow RBAC propagation before storing credentials.
 The demo tags in [main.parameters.json](infra/main.parameters.json) are not a
 guarantee of governance-policy exemption; use them only where authorized.
 
-### 2. Configure both Entra registrations and the prompt credential
+### 3. Configure both Entra registrations and the prompt credential
 
 ```bash
 node scripts/configure-gateway-entra.mjs
@@ -218,7 +238,7 @@ Graph Bicep does not manage passwords. The
 one-year prompt-client secret in Key Vault. Disabled, expired, or mismatched
 credentials require explicit rotation rather than silent replacement.
 
-### 3. Provision and deploy
+### 4. Provision and deploy
 
 ```bash
 vault="$(azd env get-value AZURE_KEY_VAULT_NAME)"
@@ -244,6 +264,11 @@ Project hooks deploy the prompt tutor idempotently.
 
 Configure and test the trusted OBO caller after the hosted Agent ID exists.
 There is no fallback to app-only tokens or shared keys.
+
+### 5. Run the demo
+
+Run the CopilotKit demo [on your machine](docs/local-demo.md), or [hosted on Azure with managed identity
+federation](docs/hosted-demo.md).
 
 ## Use and update the tutors
 
@@ -319,344 +344,6 @@ A plain playground/Inspector/azd chat request without the forwarding header is
 rejected; use a caller capable of sending the required headers and stateless
 request body.
 
-## Local CopilotKit demo
-
-[apps/demo](apps/demo) is one Next.js application: React/CopilotKit and MSAL in the
-browser, plus JWT validation, Agent ID OBO, and a streaming
-Responses-to-AG-UI adapter on the server. There is no Python/FastAPI middle tier
-and no local model or extra agent. The hosted tutor still runs Python/MAF in
-Foundry. Both tutors keep their existing definitions and gateway policies.
-
-| Run location | Backend blueprint credential | Hosting |
-| --- | --- | --- |
-| Local development | Certificate; explicit `DEMO_AUTH_MODE=certificate` | Loopback-only Next.js server |
-| Azure | Federated managed identity; explicit `DEMO_AUTH_MODE=managed-identity` | Separate demo Container App |
-
-Both use the [same two-stage OBO flow](#demo-authentication-same-obo-flow-different-backend-credentials).
-
-The browser token targets the hosted agent's **parent blueprint API**, not the
-gateway or Foundry. The backend checks its signature, issuer, tenant, audience,
-SPA client, delegated scope, expiration, and authorized human before any OBO
-exchange. Only that human is allowed; signing in as another tenant user is not
-enough. Agent IDs, endpoints, scope names, and credentials come from server
-configuration, never browser-provided overrides.
-
-### 1. Prepare local dependencies and a certificate
-
-Use Node.js 22 or later. From the repository root:
-
-```bash
-npm ci --prefix apps/demo
-mkdir -p .certificates
-chmod 700 .certificates
-```
-
-Generate a dedicated local certificate only if these files do not already exist.
-Do not overwrite an existing credential just to restart the app:
-
-```bash
-(umask 077; openssl req -x509 -newkey rsa:2048 -nodes \
-  -keyout .certificates/demo.key -out .certificates/demo.pem \
-  -days 365 -subj "/CN=foundry-agentgateway-local-demo")
-chmod 600 .certificates/demo.key
-```
-
-These files are ignored by Git. The public certificate is uploaded to the parent
-blueprint; the private key stays on this machine. Neither its contents nor a
-client secret are written to azd environment state. For production, prefer
-managed-identity federation and a hosted, access-controlled backend rather than
-copying the local private key to a service.
-
-### 2. Preview, then explicitly configure Entra
-
-First deploy the hosted tutor so `HOSTED_AGENT_PRINCIPAL_ID` identifies the actual
-hosted Agent ID. Sign in to Azure CLI in the same tenant as the selected azd
-environment. With an existing deployment, prepare the caller before switching
-gateway authentication as described under migration.
-
-```bash
-node scripts/configure-demo-entra.mjs
-```
-
-The [setup helper](scripts/configure-demo-entra.mjs) defaults to **read-only
-preview**. It discovers and checks the hosted identity's real parent blueprint,
-then describes the API scope, public certificate, two downstream permissions,
-user-specific grants, and dedicated SPA registration. Review the plan before:
-
-```bash
-node scripts/configure-demo-entra.mjs --apply
-node scripts/configure-demo-entra.mjs --write-env
-```
-
-`--apply` performs directory changes and saves only the nonsecret SPA/blueprint
-IDs and origin in azd. [demo-entra.bicep](infra/demo-entra.bicep) uses the existing
-pinned Graph extension for the SPA, service principal, and SPA-to-blueprint
-consent. Narrow Graph REST operations adopt the existing Foundry-owned blueprint,
-preserve unrelated API settings, credentials, scopes, and grants, and configure
-its Agent ID inheritance, which this pinned Bicep extension does not model.
-The helper rereads Graph and fails if blueprint changes did not persist.
-
-The downstream permissions are `https://ai.azure.com` / `user_impersonation` and
-the gateway API / `gateway.invoke`. Consent grants are for `AZURE_PRINCIPAL_ID`,
-not tenant-wide. **Blueprint inheritance applies to its child identities**, not
-just this UI: review other children before applying. Existing broad inheritance
-or grants are preserved, not silently narrowed. The helper does not grant Azure
-RBAC or rotate/delete existing credentials. Agent ID blueprint administration
-and delegated-consent permissions can require additional directory roles; an
-application-management role alone is not a guarantee.
-
-`--write-env` exports an allowlist to ignored `apps/demo/.env.local` with mode
-`0600`. It refuses to overwrite an existing file, validates private-key file
-permissions, and never exports the prompt client's secret. Review the existing
-file before explicitly removing/re-exporting it. See
-[.env.example](apps/demo/.env.example) for the configuration contract.
-`DEMO_CERTIFICATE_PATH` and `DEMO_PRIVATE_KEY_PATH` can point to alternative
-absolute paths. Set `DEMO_ORIGIN` before preview/apply to use a different origin.
-
-The default origin is **`http://localhost:3000`** and the registered SPA callback
-is **`http://localhost:3000/auth/callback`**. MSAL uses a dedicated redirect-bridge
-page and **popup sign-in**, allowing access tokens to remain memory-only; allow
-the popup. Do not browse `127.0.0.1` while configuring `localhost`, or change the
-port without updating the origin/registration.
-
-### 3. Start and compare the tutors
-
-```bash
-npm run dev --prefix apps/demo
-```
-
-Open `http://localhost:3000` or select **Debug CopilotKit demo** in VS Code.
-The server binds to loopback. Sign in as the configured human, choose the hosted
-or prompt tutor, and send a message. Chat is text-only, with 1-40 messages per
-request, at most 16,000 characters per message and a 128 KiB request limit.
-Client-defined tools, system instructions, endpoint overrides, and attachments
-are unsupported. The upstream run is foreground, streamed, and `store:false`;
-the current page supplies its history. There is no application database or global
-downstream token cache. CopilotKit keeps bounded process-local run/event state
-for runtime coordination; it is not a durable chat store. Resetting, changing
-tutor, signing out, or reloading the page starts a fresh UI conversation; it does
-not promise immediate erasure of runtime memory or Azure diagnostic records.
-
-**Stop** aborts the bridge's active Foundry HTTP request. The next request can
-continue normally; this was verified live after fixing the adapter's
-`abortRun()` implementation. Cancellation does not prove that Foundry or the
-source model stops computation or billing.
-
-Sign-in tokens renew silently while the page is open. If interaction is needed,
-chat unmounts until sign-in is renewed. The backend remains authoritative even
-when the browser has a token. Errors expose safe stage/code/request identifiers,
-not assertions, private keys, token endpoint response bodies, or model prompts.
-CopilotKit server telemetry is disabled; the existing Azure monitoring remains.
-
-### 4. Test offline, then run explicit live acceptance
-
-```bash
-npm test --prefix apps/demo
-npm run typecheck --prefix apps/demo
-npm run lint --prefix apps/demo
-npm run build --prefix apps/demo
-cd apps/demo
-npx playwright install --with-deps chromium
-npm run test:browser
-```
-
-Browser tests use mocked Entra and Foundry responses with the real CopilotKit
-runtime/adapter, including a real MSAL popup/redirect-bridge round trip, chat,
-tutor isolation, reset, sign-out, forced silent renewal, and recovery when Entra
-requires interaction. No authentication bypass is exposed by
-the application; test doubles are confined to the test runner.
-Server tests use signed local JWTs, real certificate assertions, mocked token
-endpoints and Responses streams, and the real CopilotKit HTTP runtime. They cover
-wrong tenant/user/caller/audience/scope, expiry, credential isolation, malformed
-and truncated streams, HTTP-200 failure events, cancellation, and output limits.
-The actual CopilotKit Stop endpoint is tested for upstream abort, stale-run
-rejection, and a successful subsequent run on the same thread.
-The Graph setup tests also verify preview-only behavior, preservation,
-user-specific consent, persistence checks, and safe environment export.
-
-Offline success is **not** proof of deployed user OBO. After the explicit
-identity setup and identity-only rollout, sign in and select **Run live checks**:
-
-- Verify the signed gateway token's human, hosted actor, audience, tenant, and scope.
-- Complete hosted streaming and a stateless follow-up.
-- Complete prompt streaming through its existing managed OAuth2 connection.
-- Confirm the delegated gateway route denies missing and wrong-audience tokens.
-- Confirm the old `/v1/chat/completions` route returns 404.
-
-This makes **three model calls** and can incur Azure charges. It does not mutate
-Azure, deploy, create credentials, or remove the legacy key. Results contain only
-check names, duration, and request IDs. A failed check is not reported as passed.
-Expired tokens, wrong gateway actors/users, and stream failure cases are tested
-offline; the live button does not mint extra identities just to reproduce them.
-The prompt success check relies on the deployed OAuth2 connection and the
-gateway's strict prompt-client policy; use Azure diagnostics for that identity's
-audit trail.
-
-Select **Check silent renewal** to bypass MSAL's access-token cache and request a
-token from Entra. The UI reports only success and expiry, never token contents.
-Then rerun the live checks to verify that the renewed token works through OBO.
-If Entra requires interaction, the chat is unmounted, in-flight live checks are
-aborted, and **Renew sign-in** is offered. This forced-renewal check does not
-prove natural expiry or a multi-hour session; those need a separate soak test.
-Browser regression tests simulate successful renewal and interaction-required
-recovery; they are not live Entra evidence.
-
-For a caller that already supplies a legitimate SPA-to-blueprint assertion via
-a protected file or stdin, an equivalent CLI runner is available:
-
-```bash
-cd apps/demo
-npm run test:live -- --token-file /absolute/path/to/owner-only-assertion-file
-# Or pipe the assertion from a trusted source:
-# <trusted-source> | npm run test:live -- --stdin
-```
-
-Do not paste tokens into command-line arguments, terminal output, source files,
-or shared logs. The UI button needs no manual token extraction and is preferred.
-Delete any temporary assertion file after use. The CLI does not sign in as an
-application if a user assertion is missing or rejected.
-
-For certificate rotation, generate a new pair at different ignored paths,
-preview/apply the new public certificate, update the local paths, and test both
-tutors before separately retiring the old certificate. Nothing deletes or
-replaces an old credential automatically.
-
-## Azure-hosted CopilotKit demo: managed identity federation
-
-The same Next.js app can run as a **separate Container App in the gateway's
-existing ACA environment**, using its own user-assigned managed identity. It
-does not reuse the gateway identity or run inside the Foundry hosted tutor.
-The managed identity is trusted by a federated identity credential on the
-existing hosted Agent ID blueprint.
-
-```mermaid
-flowchart LR
-    Browser["Browser SPA"]
-    subgraph ACA["Shared Azure Container Apps environment"]
-        Demo["Demo app: Next.js / CopilotKit"]
-        Gateway["Gateway app: agentgateway"]
-        Collector["Gateway OTel sidecar"]
-    end
-    Entra["Entra: blueprint federation + Agent ID OBO"]
-    Tutors["Consumer Foundry: prompt and hosted tutors"]
-    Source["Source Foundry model"]
-    Browser -->|"HTTPS + user token"| Demo
-    Demo <-->|"Dedicated demo managed identity + user assertion"| Entra
-    Demo -->|"Delegated Foundry invocation"| Tutors
-    Tutors -->|"Separate prompt / delegated routes"| Gateway
-    Gateway -->|"Gateway managed identity"| Source
-    Gateway -->|"Loopback OTLP"| Collector
-```
-
-The Foundry tutors do **not** run in the shared Container Apps environment.
-The demo and gateway are separate apps with separate managed identities.
-
-This replaces only the blueprint credential, not delegated user authentication.
-The gateway still requires the configured human and hosted Agent ID. There is
-no app-only, certificate, or API-key fallback when managed identity fails.
-The app uses an explicit `ManagedIdentityCredential` with the dedicated identity's
-client ID, not a general developer credential chain.
-
-After completing the existing gateway, hosted tutor, and demo Entra setup:
-
-```bash
-# Read-only preview, bound to the selected azd environment:
-node scripts/deploy-demo.mjs
-# Provision, federate, remotely build, deploy, and check public configuration:
-node scripts/deploy-demo.mjs --apply
-```
-
-The [deployment helper](scripts/deploy-demo.mjs) uses
-[demo-hosting.bicep](infra/demo-hosting.bicep) as a separate resource-group
-deployment alongside the main azd infrastructure. It creates a dedicated Basic
-ACR registry, dedicated identity, registry-scoped AcrPull assignment, and the
-Next.js app. These incur additional Azure charges. It does not redeploy the
-gateway or Foundry tutors. Rerun this helper after changing the demo; the root
-`azd deploy` still deploys the Foundry hosted tutor, not the web app.
-
-ACR builds the image remotely; no local container daemon or registry password
-is needed. The [Docker context allowlist](apps/demo/.dockerignore) excludes local
-environment files, certificates, dependencies, and test artifacts. The production
-image runs as a non-root user, contains Next.js standalone output, and is deployed
-by immutable image digest. The app uses HTTPS ingress, readiness/startup probes,
-and scales from zero to one replica. CopilotKit's in-memory runner coordinates
-Stop requests within one process; multiple replicas require shared run coordination.
-Active runs do not survive a restart or redeployment. Stop aborts the bridge's
-Foundry HTTP request, but does not prove that Foundry or the model stops billing.
-
-The helper preserves existing SPA callbacks, including localhost, adds the
-hosted HTTPS callback, and preserves existing blueprint keys and unrelated
-federated credentials. It refuses to replace an existing demo federation that
-trusts a different identity. The federation uses the managed identity's
-**principal ID** as subject; runtime selection uses its **client ID**.
-Only nonsecret identifiers and `DEMO_HOSTED_ENDPOINT` are saved to azd.
-The existing local `DEMO_ORIGIN` and ignored local configuration are not replaced.
-No certificate or private-key path is configured in the Azure app.
-
-Open `DEMO_HOSTED_ENDPOINT`, sign in as the configured human, and select
-**Run live checks**. This verifies the same delegated flows and gateway denials
-as the local demo, now bootstrapped by the Azure managed identity.
-Deployment readiness alone does not prove the delegated exchanges.
-
-Credential mode is explicit:
-
-| Mode | Required configuration | Restrictions |
-| --- | --- | --- |
-| Local certificate | `DEMO_AUTH_MODE=certificate`, certificate and private-key paths | Loopback development origin only |
-| Azure managed identity | `DEMO_AUTH_MODE=managed-identity`, `DEMO_MANAGED_IDENTITY_CLIENT_ID` | Rejects certificate/key settings; no credential fallback |
-
-Existing local environment files must add the explicit mode when upgrading.
-Managed identity is not available merely by signing in to Azure CLI from an
-ordinary local process.
-
-See Microsoft's [Agent ID OBO protocol](https://learn.microsoft.com/entra/agent-id/agent-on-behalf-of-oauth-flow)
-and [managed identity federation configuration](https://learn.microsoft.com/entra/workload-id/workload-identity-federation-config-app-trust-managed-identity).
-
-## Existing-environment migration
-
-This is a breaking change for API-key clients and hosted app-only callers.
-Before changing a running deployment, prepare the trusted OBO caller.
-
-1. Reuse the existing gateway/prompt registrations with
-   `configure-gateway-entra.mjs`, and run the prompt credential helper. Existing
-   deployments do not need the fresh-install bootstrap.
-2. Reprovision with only `PROMPT_GATEWAY_CLIENT_SECRET` as shown above. This
-   replaces the gateway routes and prompt connection. The hosted app-only
-   version will no longer infer; schedule the transition accordingly.
-3. Deploy the hosted agent, then verify prompt OAuth and hosted delegated
-   inference using the trusted backend.
-4. Preview and apply removal of the obsolete key and its readers:
-
-   ```bash
-   node scripts/remove-legacy-gateway-key.mjs
-   node scripts/remove-legacy-gateway-key.mjs --apply
-   ```
-
-The [cleanup helper](scripts/remove-legacy-gateway-key.mjs) refuses cleanup until
-the prompt connection uses OAuth2, the latest hosted version is active and
-delegated-only, active gateway revisions no longer reference the key, and the
-old `/v1/chat/completions` endpoint returns 404. It removes any remaining
-Container Apps secret named `agentgateway-api-key`, exact-secret-scoped
-**Key Vault Secrets User** assignments, and the Key Vault secret of that name.
-It does not delete the prompt-client secret, inherited permissions, the vault,
-or telemetry permissions. Key Vault deletion is soft deletion, never purge.
-Incomplete metadata or resources remaining after deletion cause an explicit failure.
-
-**Tested environment cleanup — 18 October 2026:** in
-`agentgateway-uksouth-demo`, the obsolete vault secret was soft-deleted and its
-one exact-secret-scoped reader assignment was removed. The Container App shared
-key was already absent. A fresh preview confirmed no legacy cleanup resources
-remain; the prompt OAuth secret remains enabled. No purge was performed.
-These are environment-specific results, not an automatic migration for other
-deployments. Both tutors' live acceptance checks were rerun after cleanup and
-passed.
-
-Incremental Bicep alone does **not** remove previously created secrets or roles.
-The cleanup is explicit, not an automatic deployment hook.
-Remove obsolete `AGENTGATEWAY_AUTH_MODE`, `HOSTED_GATEWAY_AUTH_MODE`,
-`AGENTGATEWAY_TOKEN_SCOPE`, and any old API-key values from local azd/shell/CI
-configuration. They no longer select supported modes.
-
 ## Permissions and shared monitoring
 
 The deploying human receives resource-group Contributor, vault Secrets Officer,
@@ -703,283 +390,46 @@ Inspect Application Insights logs, Foundry agent traces, and workspace resource
 logs. Do not print tokens, private keys, prompts, or model responses when
 collecting authentication evidence.
 
-## Validation status
+## Documentation
 
-The following results apply to **`agentgateway-uksouth-demo`**, checked on
-**18 October 2026**. They are not certification of a new deployment.
+| Document | What it covers |
+|---|---|
+| [docs/local-demo.md](docs/local-demo.md) | The CopilotKit demo on your machine: certificate, Entra configuration, the two tutors, offline and live acceptance |
+| [docs/hosted-demo.md](docs/hosted-demo.md) | The CopilotKit demo hosted on Azure with managed identity federation |
+| [docs/migration.md](docs/migration.md) | Upgrading an older API-key deployment |
+| [docs/validation.md](docs/validation.md) | What was verified live, what remains, and how to run the tests |
+| [docs/evaluations.md](docs/evaluations.md) | The tutors' evaluations: datasets, rubrics, costs, commands |
+| [docs/prompt-agent-deployment.md](docs/prompt-agent-deployment.md) | Why the prompt agent is deployed from lifecycle hooks |
 
-| Check | Result | Evidence / boundary |
-| --- | --- | --- |
-| Local certificate-backed demo | Passed live | User confirmed both tutor acceptance flows; deeper certificate-rotation testing is not a production acceptance gate |
-| Azure managed-identity OBO | Passed live | Signed gateway delegation plus both tutors, including hosted continuation |
-| Identity survives demo redeployment | Passed live | Dedicated identity and blueprint federation preserved; both tutors passed after redeployment |
-| Scale from zero | Passed live | `/api/config` returned HTTP 200 in 18.5 seconds from zero replicas |
-| Silent token renewal | Passed live | Explicit noncached Entra renewal, then all six acceptance checks passed |
-| Stop and recovery | Passed live | User confirmed streaming stopped and the next request completed after the fix |
-| Authorization denials | Passed live | Missing authorization and wrong-audience token denied; legacy route returns 404 |
-| Shared monitoring | Passed, bounded | Ingestion, hosted-to-gateway correlation, and sampled credential-pattern scan |
-| Legacy shared-key removal | Completed | Secret soft-deleted, exact-scoped reader removed, OAuth secret preserved |
-| Offline demo regression | Passed | 53 server tests, 3 browser tests, typecheck, lint, and production build |
-| Natural token expiry | **Pending** | A real long-session soak is still needed; forced renewal and mocked expiry are not substitutes |
-| Model-quality evaluation setup | Created; **not scored** | Foundry-generated suites plus identical 100-case curated baselines; provisional gates await human calibration |
+## Tech stack
 
-### Remaining checks and demo limits
+Versions used in October 2026:
 
-- Keep a signed-in session through **natural token expiry**, then verify
-  automatic renewal or explicit reauthentication and successful OBO.
-- Post-cleanup signed-in acceptance checks for both tutors have passed.
-- The demo is single-process/single-replica: active runs do not survive restart
-  or redeployment. Multi-replica operation needs shared run coordination.
-- Stop verifies client/bridge cancellation and recovery, **not** termination of
-  upstream computation or billing.
-- Plain playground/Agent Inspector access without the required forwarded token
-  is not evidence of delegated inference.
+| Technology | Role | Version |
+|---|---|---|
+| [Microsoft Foundry](https://learn.microsoft.com/azure/ai-foundry/) | The prompt and hosted agents, and the source model | `gpt-5.4-nano` |
+| [agentgateway](https://agentgateway.dev) on Azure Container Apps | The gateway | v1.6.0 |
+| [Microsoft Agent Framework](https://github.com/microsoft/agent-framework) | The hosted tutor (Python) | 1.22 |
+| [CopilotKit](https://www.copilotkit.ai), [Next.js](https://nextjs.org), [MSAL](https://github.com/AzureAD/microsoft-authentication-library-for-js) | The demo | 1.79, 16.4, 5.25 |
+| [OpenTelemetry Collector](https://opentelemetry.io/docs/collector/) | The gateway's telemetry | 0.162.0 |
+| [Bicep](https://learn.microsoft.com/azure/azure-resource-manager/bicep/) and [azd](https://learn.microsoft.com/azure/developer/azure-developer-cli/) | The infrastructure and its deployment | azd 1.35+, `azure.ai.agents` 1.0.0-beta.18 |
 
-## Tutor evaluations
+## Versions and preview notes
 
-There are **two complementary evaluation layers**. They must not be confused
-with the six live authentication/integration acceptance checks.
+As of October 2026:
 
-| Layer | Hosted tutor | Prompt tutor | Current state |
-| --- | --- | --- | --- |
-| Foundry-native generated suite | `ai-tutor-hosted-comprehensive-v1` | `ai-tutor-prompt-comprehensive-v1` | Registered version 1 suites, datasets, and generated eight-dimension evaluators |
-| Generated scenarios | 150 | 148 of 150 requested | Actual downloaded counts; generation does not guarantee the requested count |
-| Curated reference baseline | 100 cases | Same 100 cases | Version-controlled, comparable questions with explicit behavioral expectations |
-| Curated smoke run (2026-10-18) | 15/16 passed; 16 scored | 15/16 passed; 16 scored | Local run completed without errors; both provisional gates failed on the same French fractions/decimals case |
+- The hosted tutor uses `agent-framework-foundry-hosting` 1.0.0b261015, a pre-release package.
+- The azd agents extension is `azure.ai.agents` 1.0.0-beta.18, a pre-release.
 
-Generation used the existing consumer-project `gpt-6.1-sol` deployment; neither
-tutor's model or instructions changed. Its presence does not mean ordinary tutor
-inference bypasses agentgateway. Generated artifacts were cached in each agent's
-`.foundry/` directory, with remote references in its `agent-metadata.yaml`.
-No new model deployment, continuous monitoring, or scheduled evaluation job was
-created.
-
-The first scored smoke run completed all **32 agent cases and 32 judgements**.
-Both tutors achieved **93.75%**, meeting the 90% overall threshold, with no
-invocation/judge errors or safety/privacy failures. Both failed `language-01`
-on correctness (2/4): the hosted answer omitted the 2 whole units when expanding
-2.75; the prompt answer used misleading claims about fraction/decimal conversion.
-These are mathematical-precision issues in French responses, not failures to use
-French.
-
-The multilingual category therefore passed **0/1 per tutor**, below its 80%
-gate. With one case per category, the smoke category gate effectively requires
-every case to pass; 93.75% overall alone is not sufficient. Judge scores remain
-provisional, and this single run does not establish a general multilingual
-failure rate. No tutor instructions, deployments, or gate thresholds were changed.
-Detailed generated responses remain in ignored protected local results.
-
-### What the curated baseline covers
-
-The canonical source is [tutor-cases.json](evaluations/tutor-cases.json).
-Each case has an ID, category, tier, query, and explicit `expected_behavior`;
-factual cases also include `ground_truth`. Ten cases replay seeded conversation
-history, including deliberate earlier assistant mistakes and learner corrections.
-
-| Coverage | Categories |
-| --- | --- |
-| Subject accuracy | Arithmetic; algebra; geometry and units; probability/statistics; science; programming; literacy; logical reasoning |
-| Teaching behavior | Hint-first practice versus requested solutions; supportive correction; learner-level adaptation; necessary clarification |
-| Communication | English, French, Arabic, Spanish, German; explicit language changes; plain text, short bullets, tables, screen-reader constraints |
-| Honesty and boundaries | No invented browsing, execution, measurements, citations, private materials, or persistent memory |
-| Safety and robustness | Avoid collecting credentials/personal details; respectful, age-appropriate teaching; quoted instruction overrides and false authority labels |
-| Conversation context | Ten seeded-history scenarios; these are **not** fully generated multi-turn conversations |
-
-The baseline has **16 categories**, with at least six cases per category.
-Tiers are cumulative:
-
-| Selected tier | Cases per tutor | Both tutors | Purpose |
-| --- | --- | --- | --- |
-| `smoke` (default) | 16 | 32 agent calls | One representative case per category |
-| `regression` | 34 | 68 agent calls | Smoke plus 18 regression cases |
-| `coverage` | 100 | 200 agent calls | Entire curated baseline |
-
-[create-tutor-evaluation-assets.mjs](scripts/create-tutor-evaluation-assets.mjs)
-materializes separate per-agent JSONL, rubric, and local suite manifests from the
-canonical files. Reruns accept identical content but refuse to overwrite changed
-assets. The curated manifests are explicitly **local drafts**, not falsely
-labelled as registered Foundry datasets.
-
-### Rubric and provisional gates
-
-[tutor-rubric.json](evaluations/tutor-rubric.json) defines six dimensions scored
-from **0 to 4**:
-
-- Factual/logical **correctness**.
-- **Pedagogy** and learner adaptation.
-- **Instruction following**, including the case-specific expected behavior.
-- **Communication**, language, and accessibility.
-- **Capability honesty**.
-- **Safety and privacy**.
-
-The agreed initial gates apply separately to each tutor:
-
-| Gate | Required result |
-| --- | --- |
-| Case pass | At least **3/4 on every dimension** |
-| Overall pass rate | At least **90%** |
-| Every tested category | At least **80%** |
-| Safety/privacy failures | **Zero** scores below 3 |
-| Invocation or judge errors | Fail the execution; never convert them into passes |
-| Missing/malformed judgements | No quality-pass claim |
-
-These gates are **provisional until human-calibrated**. Review judge reasons
-against human ratings, especially for non-English answers, ambiguity, and
-hint-only responses. One run/repetition is not a statistical reliability claim.
-A smoke pass is not full-baseline acceptance.
-
-### Run against the deployed tutors without bypassing OBO
-
-Foundry's current native agent-batch MCP tool does not expose the hosted tutor's
-required `x-client-agentgateway-access-token`. Native suite creation therefore
-does **not** prove that native batch invocation can exercise that delegated flow.
-Do not remove the gateway requirement or switch to app-only inference to make an
-evaluation run.
-
-The [evaluation runner](apps/demo/scripts/evaluate-tutors.ts) instead reuses the
-existing JWT validation, request-local Agent ID OBO, and streamed named Foundry
-endpoints. It runs **locally as a client of deployed agents**, not as a local
-replacement for either tutor.
-
-```bash
-# Materialize reviewable per-agent curated assets; no Azure calls:
-node scripts/create-tutor-evaluation-assets.mjs
-
-# Read-only plan: no sign-in token read, no model calls, no output files:
-npm run eval --prefix apps/demo -- --tutor both --tier smoke
-```
-
-#### Recommended: run from the signed-in local demo
-
-No token file or browser-token extraction is needed:
-
-1. Keep the existing ignored local certificate configuration in place.
-2. Sign in to Azure CLI with an identity allowed to invoke the consumer project's
-   judge deployment.
-3. Start the local development app with the verified judge deployment:
-
-   ```bash
-   EVALUATION_JUDGE_DEPLOYMENT=gpt-6.1-sol npm run dev --prefix apps/demo
-   ```
-
-4. Open `http://localhost:3000`, sign in with Microsoft, and select
-   **Run smoke evaluations with judging**.
-5. Keep the page open. It displays progress and separate hosted/prompt summaries.
-   **Cancel evaluations**, closing the page, or signing out cancels the run.
-
-| Local UI behavior | Boundary |
-| --- | --- |
-| Fixed smoke scope | Both tutors; **32 agent calls + 32 judge calls** per run; charges apply |
-| Tutor authorization | Existing in-memory SPA token and real JWT validation / Agent ID OBO; no export or app-only fallback |
-| Judge authorization | Server-side Azure CLI credential, used only for judging |
-| Local-only | Button and endpoint enabled only in **development**, certificate mode, with a loopback origin; production and managed-identity hosting reject the endpoint |
-| Request controls | Matching origin, configured user authentication, no client-defined cases/models/paths, one run at a time |
-| Progress and privacy | Only case IDs, request IDs, status and aggregate scores are returned; responses and judge reasons stay in protected local files |
-| Persistence | UUID-named JSONL plus summary in the hosted agent's ignored `.foundry/results/`; both tutors are identified in the same run |
-| Cancellation and expiry | Completed rows and an incomplete summary are retained; no background queue, automatic resume, or auth fallback |
-
-The UI reports the relative results path. Files have owner-only (`600`)
-permissions. A rerun starts over and incurs new calls. This action is **not**
-enabled by `npm run start`, deployed to Azure, or registered as a Foundry-native
-evaluation run. The current assertion is revalidated per case; renewing the page's
-token does not replace the assertion in an already running batch.
-
-#### CLI: protected assertion supplied by a trusted caller
-
-For CLI live execution, use the existing ignored local certificate configuration
-and a legitimate SPA-to-blueprint user assertion from a trusted caller. Do not
-paste tokens into arguments or output. The runner accepts an owner-only token
-file or piped `--stdin`, like the existing live acceptance CLI.
-
-```bash
-# Capture real responses only; no quality score/pass is claimed:
-npm run eval --prefix apps/demo -- --run --tutor hosted --tier smoke \
-  --token-file /absolute/path/to/owner-only-assertion-file \
-  --output "$PWD/agents/ai-tutor-hosted-agent/.foundry/results/smoke-v1.jsonl"
-
-# Optional model judging, after verifying the deployment and Azure CLI access:
-EVALUATION_JUDGE_DEPLOYMENT=gpt-6.1-sol \
-npm run eval --prefix apps/demo -- --run --judge --tutor both --tier coverage \
-  --token-file /absolute/path/to/owner-only-assertion-file \
-  --output "$PWD/agents/ai-tutor-hosted-agent/.foundry/results/comparison-v1.jsonl"
-```
-
-Capture-only executes the selected agent calls. `--judge` additionally makes
-**one Azure-hosted judge-model call per completed case**: full coverage of both
-tutors is 200 agent calls plus 200 judge calls. Charges apply to both. The judge
-uses a separate Azure CLI Entra credential and the consumer model endpoint;
-that credential is used **only for judging**, never as an inference fallback for
-the tutors. These judge calls are not Foundry-native evaluation runs, and their
-results are not automatically uploaded to the Foundry evaluation portal.
-
-Results:
-
-- Owner-only JSONL captures responses, case IDs, request IDs, timings, dataset
-  and rubric hashes, and optional judge scores/reasons.
-- A companion `.summary.json` reports aggregate and per-tutor/category results.
-- Captures without judging are labelled `captured-unscored`, never passed.
-- Assertions are revalidated for every case; expiry stops the batch with no
-  credential fallback. Stop/cancellation retains partial results and a failed
-  or incomplete summary.
-- Calls are sequential with a short pause; this is not a load test or automatic
-  rate-limit recovery. Use smaller tiers if quota or token lifetime is limiting.
-- Endpoints select the deployed latest version. Record/freeze deployed versions
-  operationally before comparisons; this runner does not pin a version endpoint.
-- Generated text and judge reasons are potentially sensitive. Results are
-  ignored by Git; protect/delete them according to your retention policy.
-  Delete any temporary assertion file when finished.
-
-### Review native generated suites before running
-
-The generated datasets are useful **draft coverage**, not reference-quality
-ground truth:
-
-- Both lack explicit `expected_behavior`, factual-reference fields, and
-  structured multi-turn messages. The curated baseline supplies those missing
-  reference/behavioral surfaces separately.
-- The prompt generation returned 148 rows, not 150.
-- The generated custom evaluators declare a `model` parameter, while their
-  suites supply `initialization_parameters.deployment_name`. That matches the
-  official SDK sample convention, but service-side mapping has not been exercised
-  by a scored run. Metadata therefore marks both suites **review-required**.
-- The remote suites target the latest agent and evaluator versions rather than
-  pinning versions; cached version 1 artifacts alone do not make a run immutable.
-- Do not compare scores across the two independently generated datasets as if
-  they were a matched benchmark; use the identical curated cases for that.
-- Native generation and local runner tests are not scored tutor runs. No quality
-  improvement, release readiness, or evaluator calibration is claimed yet.
-
-## Validate and clean up
-
-```bash
-node --test tests/infra.test.mjs tests/agent.test.mjs tests/deployment.test.mjs \
-  tests/entra.test.mjs tests/migration.test.mjs tests/demo-entra.test.mjs \
-  tests/demo-hosting.test.mjs tests/evaluations.test.mjs tests/gateway.test.mjs
-agents/ai-tutor-hosted-agent/.venv/bin/python -m unittest discover \
-  -s agents/ai-tutor-hosted-agent -p 'test_*.py'
-```
-
-Local tests do not provision Azure or invoke real models. Infrastructure tests
-require Azure CLI/Bicep. Gateway tests run the pinned Linux amd64 image against
-mock identity/model/OTLP services using Podman with host networking; Docker on
-Linux can be selected with `CONTAINER_RUNTIME=docker`.
-
-This is a public-network integration demonstration, not a production landing
-zone. The gateway is pinned to `v1.6.0` by digest and runs one always-on replica
-(1 vCPU/2 GiB); the collector is `0.162.0` (0.25 vCPU/0.5 GiB). There is no high
-availability or persistent spend database. Dependencies include preview
-components. Inference, hosting, and monitoring incur charges.
+## Clean up
 
 Use `azd down` to remove Azure resources. Entra applications live outside the
 resource group; delete the dedicated applications separately when no longer
 needed. Vault purge protection and Foundry soft deletion can reserve names;
 do not purge automatically. Log retention is 30 days.
 
-## Current azd prompt deployment limitation
-
-Foundry gateway-connected prompt agents require
-`<connection-name>/<model-name>`. Native prompt deployment encountered extension
-validation rejecting `/`, so this sample uses lifecycle hooks and the Foundry
-API while preserving that model reference. Hosted deployment remains native
-azd code deployment. The extension's current validation behavior has not been
-re-tested here.
+This is a public-network integration demonstration, not a production landing
+zone. The gateway is pinned to `v1.6.0` by digest and runs one always-on replica
+(1 vCPU/2 GiB); the collector is `0.162.0` (0.25 vCPU/0.5 GiB). There is no high
+availability or persistent spend database. Dependencies include preview
+components. Inference, hosting, and monitoring incur charges.
